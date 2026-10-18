@@ -12,6 +12,10 @@ import { Time } from './Time.js';
 import { VWorldError, vError, createErrorBus } from './util/errors.js';
 import { Profiler } from './Profiler.js';
 import { resolveQuality, normalizeQuality, autoStep } from './util/quality.js';
+import {
+  InstancedSet, Decal, CloudLayer, LightShaft,
+  makeMaterial, resolveShadowConfig,
+} from './Rendering.js';
 
 /**
  * VWorld Engine — core application object.
@@ -83,6 +87,9 @@ export class Engine {
     // --- plugin + event plumbing (must exist before subsystems) ------------
     this._plugins = new Map();
     this._events = new Map();
+
+    // --- v0.5.0: rendering handles (instanced sets, decals, clouds, shafts)
+    this._renderHandles = new Set();
 
     // --- v0.4.0: disposal / debug / quality ----------------------------------
     this._disposed = false;
@@ -426,6 +433,12 @@ export class Engine {
     }
     this._liveEntities.clear();
 
+    // v0.5.0: dispose rendering handles (instanced sets, decals, clouds, shafts).
+    for (const h of [...this._renderHandles]) {
+      try { h.dispose(); } catch (err) { this._errorBus.report(err); }
+    }
+    this._renderHandles.clear();
+
     this.stop();
     const canvas = this.options.canvas;
     if (canvas) {
@@ -482,6 +495,135 @@ export class Engine {
   add(thing) {
     this.scene.add(thing.object ?? thing);
     return this;
+  }
+
+  // --- rendering richness (v0.5.0) ----------------------------------------------
+
+  /**
+   * One draw call for many copies: crowds, forests, grass tufts, debris.
+   * Accepts positional args or a single options object (normalize law).
+   * The set is tracked and disposed with the app.
+   *
+   *   app.instanced(geo, mat, 500)
+   *     .scatter({ box: [-60, 60], y: 0, scale: [0.7, 1.4] })
+   *     .addTo(app);
+   *   app.instanced({ geometry: geo, material: mat, count: 200 });
+   */
+  instanced(geometry, material, count = 100) {
+    if (this._disposed) {
+      throw vError('VWORLD/APP_DISPOSED', '[VWorld] app.instanced() called after app.dispose() — create a new Engine instead.');
+    }
+    if (geometry && typeof geometry === 'object' && !geometry.isBufferGeometry) {
+      // Object form: app.instanced({ geometry, material, count })
+      ({ geometry, material, count = 100 } = geometry);
+    }
+    const set = new InstancedSet(this, geometry, material, count);
+    this._renderHandles.add(set);
+    return set;
+  }
+
+  /**
+   * A tuned MeshStandardMaterial from the preset library, with optional
+   * overrides. `color` accepts any toColor shape.
+   *
+   *   app.material('brass');                       // preset as-is
+   *   app.material('glass', { opacity: 0.5 });     // tweaked
+   *   app.material({ preset: 'wood', color: 'red' });
+   *
+   * Presets: metal, chrome, gold, brass, copper, glass, water, plastic,
+   * rubber, wood, stone, grass, paper, emissive.
+   */
+  material(name, overrides = {}) {
+    if (name && typeof name === 'object') {
+      const { preset, ...rest } = name;
+      if (preset === undefined) {
+        throw vError('VWORLD/UNKNOWN_MATERIAL', '[VWorld] app.material({ preset }) — the preset name is required.');
+      }
+      return makeMaterial(preset, rest);
+    }
+    return makeMaterial(name, overrides);
+  }
+
+  /**
+   * Tune the sun's shadow map. With no arguments, returns the current
+   * settings as a plain object. Chainable when applying.
+   *
+   *   app.shadows({ mapSize: 4096, bias: -0.0002, bounds: 90 });
+   *   app.shadows({ mapSize: [2048, 2048], bounds: { left: -40, right: 40, top: 60, bottom: -60 } });
+   */
+  shadows(options) {
+    if (options === undefined) {
+      const s = this.world.sun.shadow;
+      return {
+        mapSize: [s.mapSize.x, s.mapSize.y],
+        bias: s.bias, normalBias: s.normalBias, radius: s.radius,
+        left: s.camera.left, right: s.camera.right,
+        top: s.camera.top, bottom: s.camera.bottom,
+        near: s.camera.near, far: s.camera.far,
+      };
+    }
+    const cfg = resolveShadowConfig(options);
+    const sh = this.world.sun.shadow;
+    sh.mapSize.set(cfg.mapSize[0], cfg.mapSize[1]);
+    sh.bias = cfg.bias;
+    sh.normalBias = cfg.normalBias;
+    sh.radius = cfg.radius;
+    sh.camera.left = cfg.left;
+    sh.camera.right = cfg.right;
+    sh.camera.top = cfg.top;
+    sh.camera.bottom = cfg.bottom;
+    sh.camera.near = cfg.near;
+    sh.camera.far = cfg.far;
+    sh.camera.updateProjectionMatrix();
+    if (sh.map) { sh.map.dispose(); sh.map = null; } // force realloc at new size
+    return this;
+  }
+
+  /**
+   * Stick a decal to a surface: bullet holes, scorch marks, paint splats.
+   * Added to the scene automatically; tracked and disposed with the app.
+   *
+   *   app.decal({ preset: 'scorch', position: hitPoint, normal: hitNormal,
+   *               size: 2.5, lifetime: 45, fade: 5 });
+   */
+  decal(options = {}) {
+    if (this._disposed) {
+      throw vError('VWORLD/APP_DISPOSED', '[VWorld] app.decal() called after app.dispose() — create a new Engine instead.');
+    }
+    const d = new Decal(this, options).addTo(this);
+    this._renderHandles.add(d);
+    return d;
+  }
+
+  /**
+   * Procedural drifting clouds. Added to the scene automatically; tracked
+   * and disposed with the app.
+   *
+   *   app.clouds({ count: 60, area: 500, height: [100, 160], speed: 3 });
+   */
+  clouds(options = {}) {
+    if (this._disposed) {
+      throw vError('VWORLD/APP_DISPOSED', '[VWorld] app.clouds() called after app.dispose() — create a new Engine instead.');
+    }
+    const c = new CloudLayer(this, options).addTo(this);
+    this._renderHandles.add(c);
+    return c;
+  }
+
+  /**
+   * Fake volumetric light shaft: an additive cone, narrow at `from`,
+   * wide at `to`. Added to the scene automatically; tracked and disposed
+   * with the app.
+   *
+   *   app.lightShaft({ from: [0, 30, 0], to: [0, 0, 0], radius: 6 });
+   */
+  lightShaft(options = {}) {
+    if (this._disposed) {
+      throw vError('VWORLD/APP_DISPOSED', '[VWorld] app.lightShaft() called after app.dispose() — create a new Engine instead.');
+    }
+    const s = new LightShaft(this, options).addTo(this);
+    this._renderHandles.add(s);
+    return s;
   }
 
   resize() {

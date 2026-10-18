@@ -171,6 +171,33 @@ app.every(0.12, () => {
   if (Math.random() < 0.4) app.effects.burst('smoke', [12, 1.6, 8]);
 });
 
+// --- v0.5.0: rendering richness ---------------------------------------------------------------
+// Instanced pine forest on the far hill (one draw call for 300 trees).
+{
+  const trunkG = new THREE.CylinderGeometry(0.18, 0.28, 1.6, 6);
+  const trunkM = app.material('wood');
+  app.instanced(trunkG, trunkM, 300)
+    .scatter({ box: { x: [-90, -40], z: [-90, -40] }, y: 0, scale: [0.8, 1.6] })
+    .addTo(app);
+  const topG = new THREE.ConeGeometry(1.4, 3.2, 7);
+  const topM = app.material('grass', { color: 0x2d5a27 });
+  app.instanced(topG, topM, 300)
+    .scatter({ box: { x: [-90, -40], z: [-90, -40] }, y: 2.2, scale: [0.8, 1.6] })
+    .addTo(app);
+}
+// Drifting clouds + a god-ray over the campfire clearing.
+app.clouds({ count: 50, area: 600, height: [110, 170], speed: 2.5 });
+app.lightShaft({ from: [12, 26, 8], to: [12, 0, 8], radius: 7, intensity: 0.5 });
+// Sharper shadows for the showcase.
+app.shadows({ mapSize: 2048, bounds: 80 });
+// Clicks now also leave a fading scorch decal where they land.
+canvas.addEventListener('click', (e) => {
+  const hit = app.build.pickScene(e.clientX, e.clientY);
+  if (hit && hit.normal) {
+    app.decal({ preset: 'scorch', position: hit.point, normal: hit.normal, size: 1.2, lifetime: 20, fade: 4 });
+  }
+});
+
 // --- third-person player --------------------------------------------------------------------
 const player = new PlayerController(app, { speed: 6, runSpeed: 9.5 });
 player.spawn(0, 4, 10);

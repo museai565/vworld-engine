@@ -71,7 +71,8 @@ export class Build {
 
   /**
    * Raycast from a screen position (pixels, relative to canvas) against
-   * target objects. Returns { point, snapped, object } or null.
+   * target objects. Returns { point, normal, snapped, object, distance }
+   * or null. `normal` is the face normal in world space (up when unknown).
    */
   pick(screenX, screenY, targets, { snap = true } = {}) {
     const canvas = this.engine.options.canvas;
@@ -83,12 +84,17 @@ export class Build {
     this._raycaster.setFromCamera(ndc, this.engine.camera);
     const hits = this._raycaster.intersectObjects(targets, false);
     if (!hits.length) return null;
-    const point = hits[0].point.clone();
+    const hit = hits[0];
+    const point = hit.point.clone();
+    const normal = hit.face
+      ? hit.face.normal.clone().transformDirection(hit.object.matrixWorld)
+      : new THREE.Vector3(0, 1, 0);
     return {
       point,
+      normal,
       snapped: snap ? this.snapVec3(point) : point,
-      object: hits[0].object,
-      distance: hits[0].distance,
+      object: hit.object,
+      distance: hit.distance,
     };
   }
 

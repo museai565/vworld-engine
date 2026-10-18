@@ -126,6 +126,41 @@ export function axisToVec3(axis) {
 }
 
 /**
+ * Normalize any color-like input into a fresh THREE.Color.
+ * Accepts: 0xRRGGBB | '#rrggbb' | 'red' (CSS names) | THREE.Color (cloned) |
+ * { r, g, b } (0..1 floats).
+ */
+export function toColor(v, name = 'color') {
+  if (v === undefined || v === null) {
+    throw new Error(
+      `[VWorld] "${name}" needs a color — pass 0xRRGGBB, '#rrggbb', a CSS name, a THREE.Color, or { r, g, b }.`
+    );
+  }
+  if (v.isColor) return v.clone();
+  if (typeof v === 'number') {
+    if (!Number.isFinite(v) || v < 0 || v > 0xffffff) {
+      throw new Error(`[VWorld] "${name}" as a hex number must be 0x000000–0xFFFFFF — got ${v}.`);
+    }
+    return new THREE.Color(v);
+  }
+  if (typeof v === 'string') {
+    const s = v.trim();
+    const isHex = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i.test(s);
+    const isName = /^[a-z]+$/i.test(s) && THREE.Color.NAMES[s.toLowerCase()] !== undefined;
+    if (!isHex && !isName) {
+      throw new Error(`[VWorld] "${name}" — can't parse color string "${v}". Try 0xRRGGBB, '#rrggbb', or a CSS name like 'red'.`);
+    }
+    return new THREE.Color(s);
+  }
+  if (typeof v === 'object' && typeof v.r === 'number' && typeof v.g === 'number' && typeof v.b === 'number') {
+    return new THREE.Color(v.r, v.g, v.b);
+  }
+  throw new Error(
+    `[VWorld] "${name}" needs a color — pass 0xRRGGBB, '#rrggbb', a CSS name, a THREE.Color, or { r, g, b } (got ${describe(v)}).`
+  );
+}
+
+/**
  * Normalize any box-like input into a fresh THREE.Box3.
  * Accepts: Box3 (cloned) | [x0,y0,z0,x1,y1,z1] | { min, max } | { center, size }
  * where min/max/center accept any toVec3 shape and size is a number or any

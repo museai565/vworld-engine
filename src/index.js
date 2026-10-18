@@ -23,10 +23,19 @@ export { Time, EASES, easeValue } from './Time.js';
 export { AudioPlugin, EffectsPlugin, PostPlugin, AnimationPlugin, allPlugins } from './plugins/index.js';
 export { SurfaceKinds, buildAtlas, buildSplatMaterial, evaluateRuleWeight, compositeWeights, valueNoise, MAX_SURFACE_LAYERS } from './Surfaces.js';
 export { FluidSystem, Fluid, BUILTIN_FLUID_TYPES, submergedFraction, buoyancyNetAccel } from './Fluids.js';
-export { toVec3, toXYZ, toNumber, withDefaults, toAxis, axisToVec3, toBox3 } from './util/normalize.js';
+export { toVec3, toXYZ, toNumber, toColor, withDefaults, toAxis, axisToVec3, toBox3 } from './util/normalize.js';
+// v0.5.0 — rendering richness
+export {
+  InstancedSet, Decal, CloudLayer, LightShaft,
+  normalizeLodLevels, selectLod,
+  MATERIAL_PRESETS, materialPresetNames, resolveMaterialPreset, makeMaterial,
+  resolveShadowConfig,
+  decalFrame, decalOpacity, scorchTexture, bulletTexture, decalPresetNames,
+  shaftFrame, cloudLayout, cloudTexture,
+} from './Rendering.js';
 // v0.4.0 — production hardening
 export { Profiler } from './Profiler.js';
 export { VWorldError, vError, createErrorBus, reportError } from './util/errors.js';
 export { QUALITY_LEVELS, resolveQuality, normalizeQuality, autoStep } from './util/quality.js';
 
-export const VERSION = '0.4.0';
+export const VERSION = '0.5.0';

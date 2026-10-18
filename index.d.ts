@@ -1,5 +1,5 @@
 /**
- * VWorld Engine — TypeScript definitions (v0.4.0).
+ * VWorld Engine — TypeScript definitions (v0.5.0).
  *
  *   import { Engine, VWorldError, type QualityMode } from '@vworld/engine';
  *
@@ -128,6 +128,35 @@ export class Engine {
   entity(): Entity;
   /** Add an Entity (or raw Object3D) to the scene. */
   add(thing: Entity | THREE.Object3D): this;
+
+  /**
+   * One draw call for many copies (crowds, forests, debris).
+   * `app.instanced(geo, mat, 500)` or `app.instanced({ geometry, material, count })`.
+   */
+  instanced(geometry: THREE.BufferGeometry, material: THREE.Material, count?: number): InstancedSet;
+  instanced(options: { geometry: THREE.BufferGeometry; material: THREE.Material; count?: number }): InstancedSet;
+  /**
+   * A tuned MeshStandardMaterial from the preset library.
+   * `app.material('brass')`, `app.material('glass', { opacity: 0.5 })`,
+   * or `app.material({ preset: 'wood', color: 'red' })`.
+   */
+  material(name: MaterialPresetName, overrides?: Record<string, unknown>): THREE.MeshStandardMaterial;
+  material(options: { preset: MaterialPresetName } & Record<string, unknown>): THREE.MeshStandardMaterial;
+  /**
+   * Tune the sun's shadow map; no args returns the current settings.
+   * `app.shadows({ mapSize: 4096, bounds: 90 })`. Chainable when applying.
+   */
+  shadows(options: ShadowOptions): this;
+  shadows(): ResolvedShadowConfig;
+  /**
+   * Stick a decal to a surface (bullet holes, scorch marks).
+   * Added to the scene automatically.
+   */
+  decal(options?: DecalOptions): Decal;
+  /** Procedural drifting clouds. Added to the scene automatically. */
+  clouds(options?: CloudOptions): CloudLayer;
+  /** Fake volumetric light shaft (additive cone). Added to the scene automatically. */
+  lightShaft(options?: LightShaftOptions): LightShaft;
   /** Re-sync renderer size to the canvas. */
   resize(): this;
 }
@@ -155,6 +184,14 @@ export class Entity {
   cylinder(rTop: number, rBottom: number, height: number, color?: number): this;
   /** Recolor every mesh in this entity. */
   colored(hex: number): this;
+
+  /**
+   * Distance-based level of detail. `mesh` per level: THREE.Object3D | Entity | null (hidden).
+   * Accepts `{ distance, mesh }` objects or `[distance, mesh]` pairs.
+   */
+  lod(levels: Array<{ distance: number; mesh: THREE.Object3D | Entity | null } | [number, THREE.Object3D | Entity | null]>): this;
+  /** The active LOD level index, or -1 when lod() was never called. */
+  readonly lodIndex: number;
 
   at(...args: Vec3Input[]): this;
   moveBy(...args: Vec3Input[]): this;
@@ -324,14 +361,23 @@ export class Net {
   disconnect(): void;
 }
 
+/** Result of Build.pick() / pickScene(): raycast hit with world-space normal. */
+export interface PickResult {
+  point: THREE.Vector3;
+  /** Face normal in world space (up when the hit has no face). */
+  normal: THREE.Vector3;
+  snapped: THREE.Vector3;
+  object: THREE.Object3D;
+  distance: number;
+}
 /** Build — prop-building primitives (grid snapping, ghost preview, picking). */
 export class Build {
   gridSize(s: number): this;
   snap(value: number, grid?: number): number;
   ghost(geometry: THREE.BufferGeometry, color?: number): THREE.Mesh;
   clearGhost(mesh: THREE.Mesh): void;
-  pick(screenX: number, screenY: number, targets: THREE.Object3D[], options?: { snap?: boolean }): THREE.Intersection | null;
-  pickScene(screenX: number, screenY: number, options?: Record<string, unknown>): THREE.Intersection | null;
+  pick(screenX: number, screenY: number, targets: THREE.Object3D[], options?: { snap?: boolean }): PickResult | null;
+  pickScene(screenX: number, screenY: number, options?: Record<string, unknown>): PickResult | null;
   snapVec3(v: THREE.Vector3): THREE.Vector3;
 }
 
@@ -588,6 +634,165 @@ export declare function autoStep(
   avgFps: number,
   highStreak?: number
 ): { level: QualityLevel; highStreak: number };
+
+/** All material preset names. */
+export type MaterialPresetName =
+  | 'metal' | 'chrome' | 'gold' | 'brass' | 'copper' | 'glass' | 'water'
+  | 'plastic' | 'rubber' | 'wood' | 'stone' | 'grass' | 'paper' | 'emissive';
+
+/** Anything a color-like API accepts. */
+export type ColorInput = number | string | THREE.Color | { r: number; g: number; b: number };
+
+/** Normalize any color-like input into a fresh THREE.Color. */
+export declare function toColor(v: ColorInput, name?: string): THREE.Color;
+
+/** Tuned MeshStandardMaterial parameter sets, keyed by preset name. */
+export declare const MATERIAL_PRESETS: Record<MaterialPresetName, Record<string, unknown>>;
+/** All material preset names. */
+export declare function materialPresetNames(): MaterialPresetName[];
+/** Resolve a preset name (case-insensitive) + overrides into plain material params. */
+export declare function resolveMaterialPreset(name: string, overrides?: Record<string, unknown>): Record<string, unknown>;
+/** Build a THREE.MeshStandardMaterial from a preset name + overrides. */
+export declare function makeMaterial(name: string, overrides?: Record<string, unknown>): THREE.MeshStandardMaterial;
+
+/** Options for app.shadows(). */
+export interface ShadowOptions {
+  mapSize?: number | [number, number];
+  bias?: number;
+  normalBias?: number;
+  radius?: number;
+  bounds?: number | { left?: number; right?: number; top?: number; bottom?: number };
+  near?: number;
+  far?: number;
+}
+/** Normalized shadow settings. */
+export interface ResolvedShadowConfig {
+  mapSize: [number, number];
+  bias: number; normalBias: number; radius: number;
+  left: number; right: number; top: number; bottom: number;
+  near: number; far: number;
+}
+/** Normalize shadow settings into a plain config object. */
+export declare function resolveShadowConfig(options?: ShadowOptions): ResolvedShadowConfig;
+
+/** One LOD level: `{ distance, mesh }` or `[distance, mesh]`. */
+export type LodLevel =
+  | { distance: number; mesh: THREE.Object3D | Entity | null }
+  | [number, THREE.Object3D | Entity | null];
+/** Normalize LOD levels into a sorted [{ distance, mesh }] array. */
+export declare function normalizeLodLevels(levels: LodLevel[]): Array<{ distance: number; mesh: THREE.Object3D | null }>;
+/** Pick the active LOD level index for a camera distance. */
+export declare function selectLod(distance: number, levels: Array<{ distance: number; mesh?: unknown }>): number;
+
+/** Options for app.decal(). */
+export interface DecalOptions {
+  texture?: THREE.Texture | null;
+  preset?: 'scorch' | 'bullet';
+  position?: Vec3Input;
+  normal?: Vec3Input;
+  size?: number | [number, number] | { w?: number; h?: number; width?: number; height?: number };
+  lifetime?: number;
+  fade?: number;
+  opacity?: number;
+  color?: ColorInput;
+}
+/** Compute a decal quad's placement frame. */
+export declare function decalFrame(
+  position: Vec3Input, normal: Vec3Input, size?: number | [number, number] | { w?: number; h?: number }
+): { position: THREE.Vector3; quaternion: THREE.Quaternion; width: number; height: number };
+/** Opacity multiplier for a decal's age (1 → 0 over the fade window). */
+export declare function decalOpacity(age: number, lifetime: number, fade?: number): number;
+/** Procedural scorch-mark texture (needs DOM). */
+export declare function scorchTexture(size?: number): THREE.Texture;
+/** Procedural bullet-hole texture (needs DOM). */
+export declare function bulletTexture(size?: number): THREE.Texture;
+/** Decal preset names: 'scorch' | 'bullet'. */
+export declare function decalPresetNames(): string[];
+
+/** A quad stuck to a surface, with optional lifetime + fade. */
+export declare class Decal {
+  readonly mesh: THREE.Mesh;
+  readonly material: THREE.MeshBasicMaterial;
+  readonly lifetime: number;
+  readonly fade: number;
+  age: number;
+  constructor(engine: Engine | null, options?: DecalOptions);
+  addTo(appOrScene: Engine | THREE.Scene): this;
+  dispose(): this;
+}
+
+/** Frame for a shaft running from `from` (narrow) to `to` (wide). */
+export declare function shaftFrame(from: Vec3Input, to: Vec3Input): {
+  midpoint: THREE.Vector3; quaternion: THREE.Quaternion; length: number; direction: THREE.Vector3;
+};
+/** Options for app.lightShaft(). */
+export interface LightShaftOptions {
+  from?: Vec3Input; to?: Vec3Input; radius?: number;
+  color?: ColorInput; intensity?: number; segments?: number;
+}
+/** Fake volumetric light shaft (additive cone). */
+export declare class LightShaft {
+  readonly mesh: THREE.Mesh;
+  readonly material: THREE.ShaderMaterial;
+  constructor(engine: Engine | null, options?: LightShaftOptions);
+  intensity(v: number): this;
+  addTo(appOrScene: Engine | THREE.Scene): this;
+  dispose(): this;
+}
+
+/** Deterministic cloud puff layout: [{ x, y, z, scale }]. */
+export declare function cloudLayout(
+  count?: number,
+  area?: number | { x?: number; z?: number },
+  height?: number | [number, number],
+  scale?: number | [number, number],
+  seed?: number
+): Array<{ x: number; y: number; z: number; scale: number }>;
+/** Soft radial puff texture for cloud sprites (needs DOM). */
+export declare function cloudTexture(size?: number): THREE.Texture;
+/** Options for app.clouds(). */
+export interface CloudOptions {
+  count?: number; area?: number | { x?: number; z?: number };
+  height?: number | [number, number]; speed?: number;
+  scale?: number | [number, number]; opacity?: number; seed?: number; color?: ColorInput;
+}
+/** Procedural drifting clouds (needs DOM). */
+export declare class CloudLayer {
+  readonly speed: number;
+  constructor(engine: Engine | null, options?: CloudOptions);
+  update(dt: number): this;
+  addTo(appOrScene: Engine | THREE.Scene): this;
+  dispose(): this;
+}
+
+/** Per-instance transform options for InstancedSet.set(). */
+export interface InstanceTransform {
+  at?: Vec3Input;
+  scale?: number | Vec3Input;
+  rotate?: [number, number, number] | { x?: number; y?: number; z?: number };
+}
+/** Options for InstancedSet.scatter(). */
+export interface ScatterOptions {
+  box?: [number, number] | { x?: [number, number]; z?: [number, number] };
+  count?: number;
+  y?: number | [number, number];
+  scale?: number | [number, number];
+  spin?: [number, number];
+}
+/** One draw call for many copies: crowds, forests, debris. */
+export declare class InstancedSet {
+  readonly mesh: THREE.InstancedMesh;
+  readonly count: number;
+  constructor(engine: Engine | null, geometry: THREE.BufferGeometry, material: THREE.Material, count?: number);
+  set(i: number, transform?: InstanceTransform): this;
+  scatter(options?: ScatterOptions): this;
+  update(): this;
+  at(...args: Vec3Input[]): this;
+  moveBy(...args: Vec3Input[]): this;
+  shadows(on?: boolean): this;
+  addTo(appOrScene: Engine | THREE.Scene): this;
+  dispose(): this;
+}
 
 /** Engine version. */
 export declare const VERSION: string;

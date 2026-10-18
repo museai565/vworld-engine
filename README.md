@@ -617,6 +617,102 @@ app.on('contextrestored', () => hideOverlay());
 
 Both listeners are removed by `app.dispose()`.
 
+## Rendering richness (v0.5.0)
+
+### Instanced meshes — crowds, forests, debris in one draw call
+
+```js
+// Positional or object form — both fine.
+const trees = app.instanced(geo, mat, 500)
+  .scatter({ box: [-60, 60], y: 0, scale: [0.7, 1.4] })
+  .addTo(app);
+
+// …or place instances by hand:
+trees.set(0, { at: [10, 0, 5], scale: 2, rotate: [0, 1.2, 0] }).update();
+
+const crowd = app.instanced({ geometry: bodyGeo, material: skinMat, count: 200 });
+crowd.scatter({ box: { x: [-20, 20], z: [0, 40] }, count: 200, y: [0, 0.5], spin: [0, Math.PI * 2] });
+```
+
+`set(i, { at, scale, rotate })` batches matrix updates — call `.update()`
+once when done (`.scatter()` does it for you). `frustumCulled` is off by
+default (a crowd's instances span the world; the geometry bounds would lie).
+Tracked and disposed with the app.
+
+### LOD — distance-based mesh switching
+
+```js
+entity.lod([
+  { distance: 0,   mesh: hiDetail },  // or [0, hiDetail]
+  { distance: 60,  mesh: loDetail },
+  { distance: 150, mesh: null },       // hidden beyond 150
+]);
+```
+
+Levels are sorted automatically; `mesh` accepts a `THREE.Object3D`, an
+`Entity`, or `null` (culled). Meshes are reparented under the entity and
+visibility flips on camera distance each frame. `entity.lodIndex` reports the
+active level; the ticker is removed on `dispose()`.
+
+### Decals — bullet holes, scorch marks
+
+```js
+app.decal({ preset: 'scorch', position: hitPoint, normal: hitNormal, size: 2.5 });
+app.decal({ preset: 'bullet', position: hitPoint, normal: hitNormal, size: 0.6,
+            lifetime: 45, fade: 5 });   // fades out over the last 5 s, then gone
+app.decal({ texture: myTex, position, normal, size: [2, 4] });
+```
+
+Quads are nudged off the surface along the normal (no z-fighting) with
+`polygonOffset` and `depthWrite: false`. Presets are procedural canvas
+textures (`'scorch'`, `'bullet'`); pass your own `THREE.Texture` for anything
+else. `lifetime <= 0` (default) = permanent.
+
+### Clouds + light shafts
+
+```js
+app.clouds({ count: 60, area: 500, height: [100, 160], speed: 3, opacity: 0.85 });
+// Deterministic layout from `seed` (default 1337) — same sky every load.
+
+app.lightShaft({ from: [0, 30, 0], to: [0, 0, 0], radius: 6, intensity: 0.4 })
+  .intensity(0.6);   // chainable brightness
+```
+
+Clouds are billboard sprites drifting +X and wrapping around the area.
+Shafts are additive cones (narrow at `from`, wide at `to`) with a fresnel-ish
+edge fade — fake volumetrics, no render targets. Both are tracked and disposed
+with the app.
+
+### Material presets
+
+```js
+app.material('brass');                    // tuned MeshStandardMaterial
+app.material('glass', { opacity: 0.5 });  // overrides merge over the preset
+app.material({ preset: 'wood', color: 'red' });  // color takes any color shape
+```
+
+Presets: `metal`, `chrome`, `gold`, `brass`, `copper`, `glass`, `water`,
+`plastic`, `rubber`, `wood`, `stone`, `grass`, `paper`, `emissive`.
+Unknown names throw listing every valid name.
+
+### Shadow tuning
+
+```js
+app.shadows({ mapSize: 4096, bias: -0.0002, bounds: 90 });
+app.shadows({ mapSize: [2048, 2048],
+              bounds: { left: -40, right: 40, top: 60, bottom: -60 } });
+app.shadows();  // => current settings as a plain object
+```
+
+Applies to the sun's shadow camera (bounds + near/far + projection update)
+and map (size, bias, normalBias, radius). Chainable when applying.
+
+### `toColor` normalizer
+
+New in the normalize law: `toColor(0xff0000)`, `toColor('#ff0000')`,
+`toColor('red')`, `toColor(new THREE.Color())`, `toColor({ r, g, b })` — all
+yield a fresh `THREE.Color`. Garbage throws a helpful error.
+
 ## Demo playground
 
 ```bash

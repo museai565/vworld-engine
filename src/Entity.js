@@ -1,9 +1,11 @@
 import * as THREE from 'three';
 import { toVec3, toNumber, withDefaults } from './util/normalize.js';
 import { vError, reportError } from './util/errors.js';
+import { normalizeLodLevels, selectLod } from './Rendering.js';
 
 let _nextId = 1;
 let _destroyWarned = false;
+const _lodTmp = new THREE.Vector3();
 
 function stdMaterial(color) {
   return new THREE.MeshStandardMaterial({ color, roughness: 0.7, metalness: 0.05 });
@@ -31,6 +33,7 @@ export class Entity {
     this._moveTicker = null;
     this._animator = null;
     this._disposed = false;
+    this._lod = null;             // { levels, ticker } — set by lod()
   }
 
   // --- tags --------------------------------------------------------------------
@@ -248,6 +251,57 @@ export class Entity {
   }
 
   /**
+   * Distance-based level of detail. Swaps which child mesh is visible based
+   * on camera distance — distant crowds get cheap meshes, near ones get full
+   * detail. Chainable. Re-calling replaces the previous LOD setup.
+   *
+   *   entity.lod([
+   *     { distance: 0,   mesh: hiDetail },   // or [0, hiDetail]
+   *     { distance: 60,  mesh: loDetail },
+   *     { distance: 150, mesh: null },       // hidden beyond 150
+   *   ]);
+   *
+   * `mesh` accepts a THREE.Object3D, an Entity, or null (culled). Meshes are
+   * reparented under this entity; the first level should start at distance 0.
+   * The LOD ticker is removed on dispose().
+   */
+  lod(levels) {
+    const norm = normalizeLodLevels(levels);
+    // Tear down any previous LOD setup (meshes stay — they're the user's).
+    if (this._lod && this.engine) this.engine.offUpdate(this._lod.ticker);
+    for (const { mesh } of norm) {
+      if (mesh && mesh.parent !== this.object) this.object.add(mesh);
+    }
+    const obj = this.object;
+    const getCamPos = () => {
+      const cam = this.engine ? this.engine.camera : null;
+      return cam ? cam.position : null;
+    };
+    const state = { levels: norm, ticker: null, current: -1 };
+    const tick = () => {
+      const camPos = getCamPos();
+      if (!camPos || this._disposed) return;
+      const d = obj.getWorldPosition(_lodTmp).distanceTo(camPos);
+      const idx = selectLod(d, norm);
+      if (idx === state.current) return;
+      state.current = idx;
+      norm.forEach(({ mesh }, i) => {
+        if (mesh) mesh.visible = i === idx;
+      });
+    };
+    state.ticker = tick;
+    this._lod = state;
+    if (this.engine) this.engine.onUpdate(tick);
+    tick(); // set initial visibility immediately
+    return this;
+  }
+
+  /** The active LOD level index, or -1 when lod() was never called. */
+  get lodIndex() {
+    return this._lod ? this._lod.current : -1;
+  }
+
+  /**
    * Full teardown: stop tickers (frame loop + in-flight moveTo), dispose all
    * geometries/materials/textures, remove the bound physics body from the
    * physics world (via the body's own removal API when present), untrack from
@@ -260,6 +314,8 @@ export class Entity {
     this._stopMove();
     if (this._ticker && this.engine) this.engine.offUpdate(this._ticker);
     this._ticker = null;
+    if (this._lod && this.engine) this.engine.offUpdate(this._lod.ticker);
+    this._lod = null;
 
     // GPU resources: geometries, materials, and any textures on them.
     this.object.traverse((o) => {

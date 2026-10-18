@@ -1,7 +1,16 @@
 // VWorld Engine — durable node smoke tests (pure, DOM-free modules).
 // Run: node test/smoke.mjs  (must exit 0 with 0 failures)
 import * as THREE from 'three';
-import { toBox3 } from '../src/util/normalize.js';
+import { toBox3, toColor } from '../src/util/normalize.js';
+import { Entity } from '../src/Entity.js';
+import {
+  InstancedSet, Decal, CloudLayer, LightShaft,
+  normalizeLodLevels, selectLod,
+  MATERIAL_PRESETS, materialPresetNames, resolveMaterialPreset, makeMaterial,
+  resolveShadowConfig,
+  decalFrame, decalOpacity, scorchTexture, bulletTexture, decalPresetNames,
+  shaftFrame, cloudLayout,
+} from '../src/Rendering.js';
 import { evaluateRuleWeight, compositeWeights, valueNoise } from '../src/Surfaces.js';
 import { submergedFraction, buoyancyNetAccel } from '../src/Fluids.js';
 import { VWorldError, vError, createErrorBus, reportError } from '../src/util/errors.js';
@@ -244,6 +253,195 @@ console.log('== Profiler ==');
   // chainable
   const p6 = new Profiler();
   ok('begin/end/record/reset chainable', p6.begin('a') === p6 && p6.end('a') === p6 && p6.record('a', 1) === p6 && p6.reset() === p6);
+}
+
+// ---------------------------------------------------------------- v0.5.0
+console.log('== toColor ==');
+{
+  const c1 = toColor(0xff0000);
+  ok('hex number', c1.isColor && approx(c1.r, 1) && approx(c1.g, 0) && approx(c1.b, 0));
+  const c2 = toColor('#00ff00');
+  ok('css hex string', approx(c2.g, 1) && approx(c2.r, 0));
+  const c3 = toColor('red');
+  ok('css name', c3.getHex() === 0xff0000);
+  const src = new THREE.Color(0x123456);
+  const c4 = toColor(src);
+  ok('Color cloned', c4.getHex() === 0x123456 && c4 !== src);
+  const c5 = toColor({ r: 0, g: 0, b: 1 });
+  ok('{r,g,b} object', c5.getHex() === 0x0000ff);
+  ok('garbage string throws', (() => { try { toColor('notacolor'); return false; } catch (e) { return /parse color/.test(e.message); } })());
+  let threw = false;
+  try { toColor(null); } catch (e) { threw = /needs a color/.test(e.message); }
+  ok('null throws helpful', threw);
+  let threw2 = false;
+  try { toColor(0x1ffffff); } catch (e) { threw2 = true; }
+  ok('out-of-range hex throws', threw2);
+}
+
+console.log('== normalizeLodLevels / selectLod ==');
+{
+  const mA = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1));
+  const mB = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1));
+  const lv = normalizeLodLevels([{ distance: 50, mesh: mB }, { distance: 0, mesh: mA }, { distance: 150, mesh: null }]);
+  ok('sorted ascending', lv[0].distance === 0 && lv[1].distance === 50 && lv[2].distance === 150);
+  ok('null mesh kept', lv[2].mesh === null);
+  const lv2 = normalizeLodLevels([[0, mA], [60, mB]]);
+  ok('shorthand pairs', lv2.length === 2 && lv2[1].distance === 60 && lv2[1].mesh === mB);
+  ok('select 0', selectLod(0, lv) === 0);
+  ok('select 30 -> 0', selectLod(30, lv) === 0);
+  ok('select 50 -> 1', selectLod(50, lv) === 1);
+  ok('select 149 -> 1', selectLod(149, lv) === 1);
+  ok('select 150 -> 2 (culled)', selectLod(150, lv) === 2);
+  ok('select 999 -> last', selectLod(999, lv) === 2);
+  ok('empty throws VWORLD/BAD_LOD', throwsCode(() => normalizeLodLevels([]), 'VWORLD/BAD_LOD'));
+  ok('negative distance throws', throwsCode(() => normalizeLodLevels([{ distance: -1, mesh: mA }]), 'VWORLD/BAD_LOD'));
+  ok('bad mesh throws', throwsCode(() => normalizeLodLevels([{ distance: 0, mesh: 42 }]), 'VWORLD/BAD_LOD'));
+}
+
+console.log('== resolveMaterialPreset ==');
+{
+  ok('14 presets', materialPresetNames().length === 14 && materialPresetNames().includes('glass'));
+  const m = resolveMaterialPreset('metal');
+  ok('metal values', m.metalness === 0.9 && m.roughness === 0.35 && m.color === 0x9aa3ad);
+  const m2 = resolveMaterialPreset('METAL');
+  ok('case-insensitive', m2.metalness === 0.9);
+  const m3 = resolveMaterialPreset('metal', { roughness: 0.1 });
+  ok('overrides merge', m3.roughness === 0.1 && m3.metalness === 0.9);
+  const m4 = resolveMaterialPreset('plastic', { color: 'red' });
+  ok('color override normalized to hex', m4.color === 0xff0000);
+  const g = resolveMaterialPreset('glass');
+  ok('glass transparent', g.transparent === true && approx(g.opacity, 0.32));
+  ok('unknown throws VWORLD/UNKNOWN_MATERIAL', throwsCode(() => resolveMaterialPreset('unobtainium'), 'VWORLD/UNKNOWN_MATERIAL'));
+  const mat = makeMaterial('gold');
+  ok('makeMaterial builds MeshStandardMaterial', mat.isMeshStandardMaterial && approx(mat.metalness, 1.0));
+}
+
+console.log('== resolveShadowConfig ==');
+{
+  const d = resolveShadowConfig();
+  ok('defaults', d.mapSize[0] === 2048 && d.bias === -0.0004 && d.left === -70 && d.right === 70 && d.far === 1200);
+  const c = resolveShadowConfig({ mapSize: 4096, bounds: 90 });
+  ok('number forms', c.mapSize[0] === 4096 && c.mapSize[1] === 4096 && c.left === -90 && c.top === 90);
+  const c2 = resolveShadowConfig({ mapSize: [1024, 512], bounds: { left: -40, right: 40, top: 60, bottom: -60 }, bias: -0.0002 });
+  ok('array + object forms', c2.mapSize[0] === 1024 && c2.mapSize[1] === 512 && c2.left === -40 && c2.top === 60 && c2.bias === -0.0002);
+  const c3 = resolveShadowConfig({ mapSize: 10 });
+  ok('mapSize clamped to 64', c3.mapSize[0] === 64);
+  ok('bad mapSize array throws', throwsCode(() => resolveShadowConfig({ mapSize: [1, 2, 3] }), 'VWORLD/BAD_SHADOWS'));
+}
+
+console.log('== decalFrame / decalOpacity ==');
+{
+  const f = decalFrame([0, 0, 0], [0, 1, 0], 2);
+  const mapped = new THREE.Vector3(0, 0, 1).applyQuaternion(f.quaternion);
+  ok('+Z maps to normal', approx(mapped.x, 0) && approx(mapped.y, 1) && approx(mapped.z, 0));
+  ok('nudged along normal', approx(f.position.y, 0.04) && approx(f.position.x, 0));
+  ok('square size', f.width === 2 && f.height === 2);
+  const f2 = decalFrame([1, 2, 3], [1, 0, 0], [2, 4]);
+  ok('[w,h] size', f2.width === 2 && f2.height === 4);
+  const m2 = new THREE.Vector3(0, 0, 1).applyQuaternion(f2.quaternion);
+  ok('normal +X', approx(m2.x, 1) && approx(m2.y, 0) && approx(m2.z, 0));
+  ok('zero normal throws', throwsCode(() => decalFrame([0, 0, 0], [0, 0, 0], 1), 'VWORLD/BAD_DECAL'));
+  ok('negative size throws', throwsCode(() => decalFrame([0, 0, 0], [0, 1, 0], -1), 'VWORLD/BAD_DECAL'));
+  ok('permanent when lifetime 0', decalOpacity(999, 0) === 1);
+  ok('full opacity early', decalOpacity(5, 10, 2) === 1);
+  ok('linear fade', approx(decalOpacity(9.5, 10, 2), 0.25));
+  ok('gone at lifetime', decalOpacity(10, 10, 2) === 0);
+  ok('gone after lifetime', decalOpacity(15, 10, 2) === 0);
+  ok('fade 0 = no fade', decalOpacity(9.9, 10, 0) === 1);
+  ok('no-DOM texture throws VWORLD/NO_DOM', throwsCode(() => scorchTexture(), 'VWORLD/NO_DOM'));
+  ok('no-DOM bullet throws VWORLD/NO_DOM', throwsCode(() => bulletTexture(), 'VWORLD/NO_DOM'));
+  ok('decal presets listed', JSON.stringify(decalPresetNames()) === JSON.stringify(['scorch', 'bullet']));
+}
+
+console.log('== shaftFrame ==');
+{
+  const f = shaftFrame([0, 10, 0], [0, 0, 0]);
+  ok('length 10', approx(f.length, 10));
+  ok('midpoint', approx(f.midpoint.y, 5) && approx(f.midpoint.x, 0));
+  ok('direction down', approx(f.direction.y, -1));
+  const up = new THREE.Vector3(0, 1, 0).applyQuaternion(f.quaternion);
+  ok('+Y maps to direction', approx(up.y, -1) && approx(up.x, 0));
+  ok('same points throw', throwsCode(() => shaftFrame([1, 1, 1], [1, 1, 1]), 'VWORLD/BAD_SHAFT'));
+}
+
+console.log('== cloudLayout ==');
+{
+  const a = cloudLayout(20, 400, 120, [24, 64], 7);
+  const b = cloudLayout(20, 400, 120, [24, 64], 7);
+  ok('count respected', a.length === 20);
+  ok('deterministic', JSON.stringify(a) === JSON.stringify(b));
+  const c = cloudLayout(20, 400, 120, [24, 64], 8);
+  ok('different seed differs', JSON.stringify(a) !== JSON.stringify(c));
+  ok('x/z in bounds', a.every((p) => Math.abs(p.x) <= 200 && Math.abs(p.z) <= 200));
+  ok('y in range', a.every((p) => p.y >= 0 && p.y <= 120));
+  ok('scale in range', a.every((p) => p.scale >= 24 && p.scale <= 64));
+  const h = cloudLayout(5, { x: 100, z: 200 }, [80, 160], 30, 3);
+  ok('object area + height range', h.every((p) => Math.abs(p.x) <= 50 && Math.abs(p.z) <= 100 && p.y >= 80 && p.y <= 160 && p.scale === 30));
+}
+
+console.log('== InstancedSet (node-safe) ==');
+{
+  const geo = new THREE.BoxGeometry(1, 1, 1);
+  const mat = new THREE.MeshStandardMaterial({ color: 0xffffff });
+  const set = new InstancedSet(null, geo, mat, 10);
+  ok('count', set.count === 10 && set.mesh.isInstancedMesh);
+  ok('frustumCulled off by default', set.mesh.frustumCulled === false);
+  set.set(0, { at: [1, 2, 3], scale: 2, rotate: [0, Math.PI / 2, 0] });
+  const m4 = new THREE.Matrix4();
+  set.mesh.getMatrixAt(0, m4);
+  const p = new THREE.Vector3(), q = new THREE.Quaternion(), s = new THREE.Vector3();
+  m4.decompose(p, q, s);
+  ok('matrix position', approx(p.x, 1) && approx(p.y, 2) && approx(p.z, 3));
+  ok('matrix uniform scale', approx(s.x, 2) && approx(s.y, 2) && approx(s.z, 2));
+  ok('set chainable', set.set(1, { at: [0, 0, 0] }) === set);
+  ok('update chainable', set.update() === set);
+  ok('index out of range throws', throwsCode(() => set.set(10, {}), 'VWORLD/BAD_INSTANCED'));
+  ok('bad geometry throws', throwsCode(() => new InstancedSet(null, {}, mat, 5), 'VWORLD/BAD_INSTANCED'));
+  ok('bad material throws', throwsCode(() => new InstancedSet(null, geo, {}, 5), 'VWORLD/BAD_INSTANCED'));
+  set.scatter({ box: [-10, 10], count: 5, y: [0, 2], scale: [0.5, 1.5] });
+  ok('scatter runs', true);
+  ok('at/moveBy chainable', set.at(5, 0, 5) === set && set.moveBy(1, 0, 0) === set);
+  ok('dispose idempotent', set.dispose() === set && set.dispose() === set);
+}
+
+console.log('== Decal / LightShaft (node-safe) ==');
+{
+  const d = new Decal(null, { position: [0, 1, 0], normal: [0, 1, 0], size: 2, lifetime: 0 });
+  ok('decal mesh built', d.mesh.isMesh && d.mesh.geometry.parameters.width === 2);
+  ok('renderOrder 2', d.mesh.renderOrder === 2);
+  ok('unknown preset throws', throwsCode(() => new Decal(null, { preset: 'glitter' }), 'VWORLD/BAD_DECAL'));
+  ok('decal dispose idempotent', d.dispose() === d && d.dispose() === d);
+  const s = new LightShaft(null, { from: [0, 10, 0], to: [0, 0, 0], radius: 4 });
+  ok('shaft positioned at midpoint', approx(s.mesh.position.y, 5));
+  ok('additive blending', s.material.blending === THREE.AdditiveBlending);
+  ok('intensity chainable', s.intensity(0.8) === s && approx(s.material.uniforms.uIntensity.value, 0.8));
+  ok('bad radius throws', throwsCode(() => new LightShaft(null, { radius: -1 }), 'VWORLD/BAD_SHAFT'));
+  ok('shaft dispose idempotent', s.dispose() === s);
+  ok('CloudLayer needs DOM', throwsCode(() => new CloudLayer(null, {}), 'VWORLD/NO_DOM'));
+}
+
+console.log('== Entity.lod (node-safe, fake engine) ==');
+{
+  const fakeEngine = {
+    camera: { position: new THREE.Vector3(0, 0, 0) },
+    onUpdate() {}, offUpdate() {},
+  };
+  const e = new Entity(fakeEngine);
+  const hi = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1));
+  const lo = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1));
+  e.lod([{ distance: 0, mesh: hi }, [60, lo], { distance: 150, mesh: null }]);
+  ok('levels normalized + sorted', e._lod.levels.length === 3 && e._lod.levels[1].distance === 60);
+  ok('meshes reparented', hi.parent === e.object && lo.parent === e.object);
+  ok('near -> level 0', e.lodIndex === 0 && hi.visible === true && lo.visible === false);
+  fakeEngine.camera.position.set(0, 0, 100);
+  e._lod.ticker(0.016);
+  ok('mid -> level 1', e.lodIndex === 1 && hi.visible === false && lo.visible === true);
+  fakeEngine.camera.position.set(0, 0, 200);
+  e._lod.ticker(0.016);
+  ok('far -> level 2 (culled)', e.lodIndex === 2 && hi.visible === false && lo.visible === false);
+  ok('lod() chainable', e.lod([{ distance: 0, mesh: hi }]) === e);
+  e.dispose();
+  ok('dispose clears lod', e._lod === null && e.lodIndex === -1);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
