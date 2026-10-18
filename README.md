@@ -3,10 +3,11 @@
 A Laravel-DX-flavored 3D game engine built on **Three.js** + **Rapier physics** (WASM).
 Fluent, chainable APIs. Sensible defaults. One line gets a running scene.
 
-> **v0.2.0 — the grand engine.** Plugin system, audio, particles,
-> post-processing, skeletal + procedural animation, joints, sensors, vehicles,
-> terrain/water/biomes, NPC AI, and a time/tween toolkit — all behind one DX
-> law: **normalize, don't complain.**
+> **v0.3.0 — surfaces & fluids.** Rule-blended terrain materials (the floor
+> IS grass/sand/rock/snow — splat mapping), custom surface kinds, and game
+> fluids: volumes with buoyancy, currents, viscosity, damage, splash/exit
+> events, and animated surfaces — water, lava, mud, oil, or your own types.
+> All behind one DX law: **normalize, don't complain.**
 >
 > Phase 1 scope still holds: engine only. No game features (no chat, rooms, or
 > prop catalog UI). Clean seams are exposed for the game layer: multiplayer
@@ -287,6 +288,94 @@ app.world.biome('desert', { area: { center: [120, 0, 40], size: 160 } });
 
 Area shapes everywhere: `[minX, maxX, minZ, maxZ]` | `{ min, max }` | `{ center, size }`.
 
+## Terrain surfaces — the floor IS its material
+
+Instead of scattering decoration, the terrain surface itself is a rule-blended
+mix of material kinds (splat mapping). Pass `surface` to `terrain()`:
+
+```js
+app.world.terrain({
+  size: 400, height: (x, z) => hills(x, z),
+  surface: [
+    { kind: 'grass' },                                          // base layer
+    { kind: 'sand', where: { nearFluid: 'water', within: 6 } },  // beaches
+    { kind: 'rock', where: { slope: { min: 0.55 } } },           // steep faces
+    { kind: 'snow', where: { height: { min: 60 } } },           // peaks
+    { kind: 'mud',  where: { noise: { scale: 0.05, threshold: 0.63 } } },
+  ],
+});
+```
+
+`where` conditions AND together and blend smoothly; later rules win ties
+(standard over-compositing). Supported conditions:
+
+- `slope: { min, max, softness }` — gradient magnitude, 0 = flat
+- `height: { min, max, softness }` — world-space Y
+- `nearFluid: 'name-or-type', within: <meters>` — distance to a fluid volume
+- `noise: { scale, threshold, softness }` — organic patches (deterministic)
+
+A rule with no `where` covers everything — use it as the base. Built-in
+kinds: `grass | dirt | sand | rock | snow | mud` (procedural canvas textures,
+zero downloads). Register your own:
+
+```js
+app.world.surfaceKind('moss', { color: 0x3d6b2f, roughness: 1 });
+// app.world.surfaceKinds() lists everything registered
+```
+
+Up to 8 kinds per terrain. `nearFluid` works no matter which order you create
+things in — adding a fluid automatically refreshes terrain weights. Omit
+`surface` entirely for the classic single-color vertex path.
+
+## Fluids — volumes with behavior
+
+An honest note first: these are **game fluids, not Navier-Stokes**. Real
+fluid simulation doesn't run in real time in a browser at world scale. VWorld
+fluids are volumes with physical *behavior* — buoyancy, currents, viscosity —
+plus animated surfaces and splash hooks. This is what actual games do.
+
+```js
+// Box shapes: Box3 | [x0,y0,z0,x1,y1,z1] | { min, max } | { center, size }
+const lake = app.world.fluid({
+  name: 'lake', type: 'water',
+  box: { center: [55, -5.5, 55], size: [70, 6, 70] },
+  flow: [0.4, 0.15],                       // current pushes bodies (x, z)
+});
+
+// Events — splash FX hooks straight into the effects plugin:
+lake.on('splash', (body, info) => {
+  app.effects.burst({ type: 'splash', at: info.point, /* ... */ });
+  app.audio.play('pop', { at: info.point, volume: 0.35 });
+});
+lake.on('enter', (body, info) => { /* ... */ });
+lake.on('exit', (body, info) => { /* ... */ });
+lava.on('damage', (body, info) => {
+  console.log('burning!', info.amount);    // info.amount = damage this tick
+});
+lake.on('cameraUnder', (inside) => {
+  app.world.post().preset(inside ? 'dreamy' : 'cinematic'); // dive tint
+});
+```
+
+Per-fluid physics, applied every fixed tick to dynamic bodies:
+
+- **Buoyancy** — bodies float/sink by body density vs fluid density
+  (a default-density crate bobs; a dense one sinks; lava at 2.4 floats almost
+  everything while burning it)
+- **Flow** — the `flow` current pushes submerged bodies
+- **Viscosity** — exponential drag; mud (20) stops you cold, water (1) barely
+- **Damage** — `damage` per second while submerged past 25%
+
+Built-in types: `water | lava | mud | oil`. Register your own:
+
+```js
+app.world.fluidType('acid', { color: 0x7CFC00, density: 1.1, viscosity: 3, damage: 5, glow: false });
+// per-fluid overrides work too: world.fluid({ type: 'water', density: 1.2, box })
+```
+
+Fluid definitions: `{ color, density, viscosity, damage, glow, opacity, waves, speed }`.
+`fluid.topY`, `fluid.box`, `fluid.destroy()` round out the API.
+
 ## Day / night
 
 ```js
@@ -385,12 +474,15 @@ npm run dev      # open http://localhost:5173
 npm run build    # production build -> dist/
 ```
 
-The playground now showcases v0.2.0: heightfield terrain with a pond,
-scattered pines/rocks/grass, a desert biome, day/night cycle, cinematic
-post grade (toggle with `T`), dynamic crates + bouncy balls, a swinging
-hinge door, a campfire (particles), a patrolling animated character, a
-wandering AI NPC, and a physics player. Click the scene for sparkles +
-positional thuds (`F` for fireworks, `M` to mute, `G` for wireframes).
+The playground now showcases v0.3.0: rule-blended terrain (grass meadow →
+sandy shore → rocky slope → snowy peak, mud patches), a lake fluid with a
+bobbing low-density crate and splash FX on entry, a lava pool that chars and
+damages whatever touches it, camera-underwater grade switching, scattered
+pines/rocks/grass, a desert biome tint, day/night cycle, cinematic post grade
+(toggle with `T`), dynamic crates + bouncy balls, a swinging hinge door, a
+campfire (particles), a patrolling animated character, a wandering AI NPC,
+and a physics player. Click the scene for sparkles + positional thuds
+(`F` for fireworks, `M` to mute, `G` for wireframes).
 
 ## API decisions
 

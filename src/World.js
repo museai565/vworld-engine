@@ -1,5 +1,7 @@
 import * as THREE from 'three';
 import { toVec3, toNumber, withDefaults } from './util/normalize.js';
+import { SurfaceKinds, buildAtlas, buildSplatMaterial, evaluateRuleWeight, compositeWeights, MAX_SURFACE_LAYERS } from './Surfaces.js';
+import { FluidSystem } from './Fluids.js';
 
 /**
  * World — environment: sky dome, sun + hemisphere lights, fog, ground.
@@ -74,6 +76,49 @@ export class World {
     this._kinds = new Map();     // scatterable prop factories
     this._biomes = [];
     this._registerBuiltinKinds();
+    // --- v0.3.0: surfaces + fluids --------------------------------------------
+    this._surfaces = new SurfaceKinds();
+    this._fluidSystem = new FluidSystem(this);
+  }
+
+  /**
+   * Register a custom terrain surface kind (or override a built-in).
+   *   world.surfaceKind('moss', { color: 0x3d6b2f, roughness: 1 });
+   * Built-ins: grass, dirt, sand, rock, snow, mud.
+   */
+  surfaceKind(name, opts) {
+    this._surfaces.register(name, opts);
+    return this;
+  }
+
+  /** Surface kind names currently registered. */
+  surfaceKinds() {
+    return this._surfaces.names();
+  }
+
+  /**
+   * Register (or override) a fluid type.
+   *   world.fluidType('lava', { color: 0xff5a1a, density: 2.4, viscosity: 8, damage: 10, glow: true });
+   * Built-ins: water, lava, mud, oil.
+   */
+  fluidType(name, def) {
+    this._fluidSystem.registerType(name, def);
+    return this;
+  }
+
+  /**
+   * Create a fluid volume — water, lava, mud, oil, or a custom type.
+   * Box shapes: Box3 | [x0,y0,z0,x1,y1,z1] | { min, max } | { center, size }.
+   *   const lake = world.fluid({ name: 'lake', type: 'water', box: { center: [0,0,0], size: [60, 4, 60] }, flow: [0.4, 0.1] });
+   *   lake.on('splash', (body, info) => app.effects.burst('splash', info.point));
+   */
+  fluid(options) {
+    return this._fluidSystem.create(options);
+  }
+
+  /** All live fluid volumes (used by nearFluid surface rules, and by games). */
+  get fluids() {
+    return this._fluidSystem.fluids;
   }
 
   // --- scatterable prop kinds ----------------------------------------------------
@@ -167,10 +212,22 @@ export class World {
   /**
    * Heightfield terrain with matching Rapier collider.
    *   app.world.terrain({ size: 400, resolution: 96, height: (x, z) => Math.sin(x * 0.05) * 6 });
-   * Vertex colors shade by elevation automatically (set colorByHeight: false
-   * and pass `color` for a flat tint).
+   *
+   * Pass `surface` for rule-blended material kinds — the floor IS the
+   * material (splat mapping). Without it, the classic vertex-color path
+   * (`color` / `colorByHeight`) is used.
+   *   app.world.terrain({
+   *     size: 400, height: (x, z) => hills(x, z),
+   *     surface: [
+   *       { kind: 'grass' },
+   *       { kind: 'sand', where: { nearFluid: 'water', within: 6 } },
+   *       { kind: 'rock', where: { slope: { min: 0.55 } } },
+   *       { kind: 'snow', where: { height: { min: 60 } } },
+   *     ],
+   *   });
+   * Rules support slope/height bands, nearFluid, and noise; later rules win.
    */
-  terrain({ size = 200, resolution = 64, height = () => 0, color = 0x4d7c43, colorByHeight = true } = {}) {
+  terrain({ size = 200, resolution = 64, height = () => 0, color = 0x4d7c43, colorByHeight = true, surface = null, surfaceRepeat = 24 } = {}) {
     this.engine.physics._assertReady();
     if (typeof height !== 'function') throw new Error('[VWorld] terrain() — height must be a function (x, z) => y.');
     const res = Math.max(1, Math.round(toNumber(resolution, 'resolution')));
@@ -178,11 +235,6 @@ export class World {
     geo.rotateX(-Math.PI / 2);
 
     const pos = geo.attributes.position;
-    const colors = new Float32Array(pos.count * 3);
-    const base = new THREE.Color(color);
-    const low = base.clone().multiplyScalar(0.72);
-    const high = base.clone().lerp(new THREE.Color(0xffffff), 0.55);
-    const c = new THREE.Color();
     let minH = Infinity, maxH = -Infinity;
     for (let i = 0; i < pos.count; i++) {
       const h = height(pos.getX(i), pos.getZ(i));
@@ -190,23 +242,51 @@ export class World {
       if (h < minH) minH = h;
       if (h > maxH) maxH = h;
     }
-    const span = Math.max(1e-6, maxH - minH);
-    for (let i = 0; i < pos.count; i++) {
-      if (colorByHeight) {
-        const t = (pos.getY(i) - minH) / span;
-        c.copy(low).lerp(high, t * t);
-      } else {
-        c.copy(base);
+
+    let material;
+    let surfaceInfo = null;
+    if (surface && surface.length) {
+      // --- splat-mapped path: the floor IS its material -------------------
+      const rules = surface.map((r) => (typeof r === 'string' ? { kind: r } : r));
+      const kindNames = rules.map((r) => String(r.kind ?? 'grass'));
+      if (kindNames.length > MAX_SURFACE_LAYERS) {
+        throw new Error(`[VWorld] terrain surface supports up to ${MAX_SURFACE_LAYERS} kinds — got ${kindNames.length}.`);
       }
-      colors[i * 3] = c.r; colors[i * 3 + 1] = c.g; colors[i * 3 + 2] = c.b;
+      const kindDefs = kindNames.map((n) => {
+        const k = this._surfaces.get(n); // throws a helpful error on unknown
+        return { color: k.color, roughness: k.roughness };
+      });
+      const { w0, w1 } = this._computeSurfaceWeights(geo, rules, { size, resolution: res, height });
+      geo.setAttribute('aW0', new THREE.BufferAttribute(w0, 4));
+      geo.setAttribute('aW1', new THREE.BufferAttribute(w1, 4));
+      // White vertex colors: biome() tints keep working on splat terrain.
+      geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(pos.count * 3).fill(1), 3));
+      const { texture } = buildAtlas(kindNames, this._surfaces);
+      material = buildSplatMaterial(kindDefs, { repeat: surfaceRepeat, atlasTexture: texture });
+      surfaceInfo = { rules, kindNames };
+    } else {
+      // --- classic vertex-color path (unchanged) ---------------------------
+      const colors = new Float32Array(pos.count * 3);
+      const base = new THREE.Color(color);
+      const low = base.clone().multiplyScalar(0.72);
+      const high = base.clone().lerp(new THREE.Color(0xffffff), 0.55);
+      const c = new THREE.Color();
+      const span = Math.max(1e-6, maxH - minH);
+      for (let i = 0; i < pos.count; i++) {
+        if (colorByHeight) {
+          const t = (pos.getY(i) - minH) / span;
+          c.copy(low).lerp(high, t * t);
+        } else {
+          c.copy(base);
+        }
+        colors[i * 3] = c.r; colors[i * 3 + 1] = c.g; colors[i * 3 + 2] = c.b;
+      }
+      geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+      material = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.95, metalness: 0 });
     }
-    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     geo.computeVertexNormals();
 
-    const mesh = new THREE.Mesh(
-      geo,
-      new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.95, metalness: 0 })
-    );
+    const mesh = new THREE.Mesh(geo, material);
     mesh.receiveShadow = true;
     this.engine.scene.add(mesh);
 
@@ -225,8 +305,51 @@ export class World {
       body
     );
 
-    this._terrain = { size, resolution: res, height, mesh };
+    this._terrain = { size, resolution: res, height, mesh, surface: surfaceInfo };
     return mesh;
+  }
+
+  /**
+   * Evaluate splat weights for every terrain vertex. Pure rule math lives in
+   * Surfaces.js (node-testable); this just feeds it vertex data.
+   */
+  _computeSurfaceWeights(geo, rules, { size, resolution, height }) {
+    const pos = geo.attributes.position;
+    const w0 = new Float32Array(pos.count * 4);
+    const w1 = new Float32Array(pos.count * 4);
+    const fluids = this._fluidSystem.fluids;
+    const eps = Math.max(0.5, size / resolution);
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i), z = pos.getZ(i), hh = pos.getY(i);
+      const sx = (height(x + eps, z) - height(x - eps, z)) / (2 * eps);
+      const sz = (height(x, z + eps) - height(x, z - eps)) / (2 * eps);
+      const raw = rules.map((r) =>
+        evaluateRuleWeight(r, { x, z, height: hh, slope: Math.hypot(sx, sz), fluids })
+      );
+      const W = compositeWeights(raw);
+      for (let k = 0; k < rules.length; k++) {
+        if (k < 4) w0[i * 4 + k] = W[k];
+        else w1[i * 4 + (k - 4)] = W[k];
+      }
+    }
+    return { w0, w1 };
+  }
+
+  /**
+   * Recompute splat weights (e.g. after a fluid volume is created — so
+   * `nearFluid` rules work no matter which order you build things in).
+   * Called automatically by world.fluid().
+   */
+  _refreshTerrainSurface() {
+    const t = this._terrain;
+    if (!t || !t.surface) return;
+    const { w0, w1 } = this._computeSurfaceWeights(t.mesh.geometry, t.surface.rules, {
+      size: t.size, resolution: t.resolution, height: t.height,
+    });
+    t.mesh.geometry.attributes.aW0.array.set(w0);
+    t.mesh.geometry.attributes.aW1.array.set(w1);
+    t.mesh.geometry.attributes.aW0.needsUpdate = true;
+    t.mesh.geometry.attributes.aW1.needsUpdate = true;
   }
 
   /** Sample terrain height at (x, z) — 0 when no terrain exists. */
@@ -338,6 +461,7 @@ export class World {
   update(dt) {
     if (this._dayNight) this._dayNight.update(dt);
     if (this._water) this._water.mat.uniforms.uTime.value += dt;
+    this._fluidSystem.update(dt);
   }
 }
 

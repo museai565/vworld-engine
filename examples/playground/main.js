@@ -11,7 +11,9 @@ app.use(PostPlugin);
 app.use(AnimationPlugin);
 await app.ready; // WASM physics ready; subsystems usable from here
 
-// --- world: terrain + water + scatter + biome -------------------------------
+// --- world: rule-blended terrain surfaces + fluids --------------------------------
+// The floor IS its material: grass meadow -> sandy shore -> rocky slope ->
+// snowy peak, with mud patches from noise. Later rules win ties.
 const height = (x, z) => {
   const edge = Math.max(Math.abs(x), Math.abs(z));
   const hills = Math.max(0, (edge - 35) / 45); // flat in the middle, hilly outside
@@ -20,8 +22,62 @@ const height = (x, z) => {
   h -= 9 * Math.exp(-(dx * dx + dz * dz) / 700);
   return h;
 };
-app.world.terrain({ size: 320, resolution: 72, height });
-app.world.water({ level: -2.5, color: 0x2e7fd9, waves: 0.5 });
+app.world.terrain({
+  size: 320, resolution: 72, height,
+  surface: [
+    { kind: 'grass' },
+    { kind: 'sand', where: { nearFluid: 'water', within: 7 } },
+    { kind: 'rock', where: { slope: { min: 0.55 } } },
+    { kind: 'snow', where: { height: { min: 16 } } },
+    { kind: 'mud',  where: { noise: { scale: 0.05, threshold: 0.63, softness: 0.12 } } },
+  ],
+});
+
+// --- lake fluid in the pond bowl (replaces the old water plane) -------------------
+const lake = app.world.fluid({
+  name: 'lake', type: 'water',
+  box: { center: [55, -5.5, 55], size: [70, 6, 70] },
+  flow: [0.4, 0.15],
+});
+lake.on('splash', (body, info) => {
+  app.effects.burst({
+    type: 'splash', at: info.point, count: 26,
+    color: [0xbfe3ff, 0xffffff], size: 0.45, lifetime: 0.8,
+    spread: 1.6, rise: 2.6, gravity: 7,
+  });
+  app.audio.play('pop', { at: info.point, volume: 0.35 });
+});
+lake.on('cameraUnder', (inside) => {
+  // Dip the camera under the surface: swap the grade to prove the hook.
+  app.world.post().preset(inside ? 'dreamy' : 'cinematic');
+});
+
+// --- lava pool: fluid with damage --------------------------------------------------
+const lavaY = app.world.groundHeight(-40, 60);
+const lava = app.world.fluid({
+  name: 'lava-pool', type: 'lava',
+  box: { center: [-40, lavaY + 0.4, 60], size: [26, 2.4, 26] },
+});
+const scorched = new Set();
+lava.on('damage', (body, info) => {
+  if (!scorched.has(body)) {
+    scorched.add(body);
+    info.entity?.colored(0x2a1512); // charred
+    console.log(`[demo] ${info.entity?.id ?? 'body'} is taking lava damage`);
+  }
+  if (Math.random() < 0.12) app.effects.burst('fire', info.entity.object.position);
+});
+
+// --- buoyancy demo: low-density crate dropped into the lake -------------------------
+const crateE = app.entity().box(1.4, 1.4, 1.4, 0x3fa7ff).at(55, 8, 55);
+app.physics.body().dynamic().cuboid(1.4, 1.4, 1.4).at(55, 8, 55)
+  .density(0.45).friction(0.4).bind(crateE).build();
+
+// --- lava ball: floats on lava (density 1 < 2.4) while taking damage -----------------
+const lavaBallE = app.entity().sphere(0.6, 0xffd76a).at(-40, 7, 60);
+app.physics.body().dynamic().ball(0.6).at(-40, 7, 60)
+  .friction(0.4).restitution(0.3).bind(lavaBallE).build();
+
 app.world.scatter('pine-tree', { count: 220, area: [-150, 150, -150, 150] });
 app.world.scatter('rock', { count: 60, area: [-150, 150, -150, 150] });
 app.world.scatter('grass', { count: 350, area: [-120, 120, -120, 120] });

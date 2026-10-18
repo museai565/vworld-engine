@@ -21,6 +21,8 @@ export { Build } from './Build.js';
 export { AI, StateMachine } from './AI.js';
 export { Time, EASES, easeValue } from './Time.js';
 export { AudioPlugin, EffectsPlugin, PostPlugin, AnimationPlugin, allPlugins } from './plugins/index.js';
-export { toVec3, toXYZ, toNumber, withDefaults, toAxis, axisToVec3 } from './util/normalize.js';
+export { SurfaceKinds, buildAtlas, buildSplatMaterial, evaluateRuleWeight, compositeWeights, valueNoise, MAX_SURFACE_LAYERS } from './Surfaces.js';
+export { FluidSystem, Fluid, BUILTIN_FLUID_TYPES, submergedFraction, buoyancyNetAccel } from './Fluids.js';
+export { toVec3, toXYZ, toNumber, withDefaults, toAxis, axisToVec3, toBox3 } from './util/normalize.js';
 
-export const VERSION = '0.2.0';
+export const VERSION = '0.3.0';

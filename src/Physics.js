@@ -55,6 +55,12 @@ export class Physics {
     return this;
   }
 
+  /** Iterate every physics body (engine subsystems use this — e.g. fluids). */
+  eachBody(fn) {
+    for (const b of this._bodies) fn(b);
+    return this;
+  }
+
   /** Start a fluent rigid-body definition. */
   body() {
     return new BodyBuilder(this);
@@ -190,6 +196,7 @@ class BodyBuilder {
     this._density = null;
     this._sensor = false;
     this._bindTarget = null;
+    this._bodyKind = 'dynamic';
   }
 
   _ensureDesc() {
@@ -200,18 +207,21 @@ class BodyBuilder {
   // --- body type -------------------------------------------------------------
   dynamic() {
     this.p._assertReady();
+    this._bodyKind = 'dynamic';
     this._desc = this.p.RAPIER.RigidBodyDesc.dynamic().setTranslation(...this._at);
     return this;
   }
 
   static() {
     this.p._assertReady();
+    this._bodyKind = 'static';
     this._desc = this.p.RAPIER.RigidBodyDesc.fixed().setTranslation(...this._at);
     return this;
   }
 
   kinematicPosition() {
     this.p._assertReady();
+    this._bodyKind = 'kinematic';
     this._desc = this.p.RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(...this._at);
     return this;
   }
@@ -268,6 +278,8 @@ class BodyBuilder {
       ? this._colliders
       : [this.p.RAPIER.ColliderDesc.cuboid(0.5, 0.5, 0.5)]; // sensible default: 1m cube
     const b = new Body(this.p, body);
+    b.isDynamic = this._bodyKind === 'dynamic';
+    b.density = this._density ?? 1.0; // Rapier default density — fluids use it for buoyancy
     for (const c of colliders) {
       b.colliders.push(this.p.world.createCollider(c, body));
     }
@@ -286,6 +298,8 @@ export class Body {
     this.colliders = [];   // all Collider objects
     this.collider = null;  // first collider (used by character controllers)
     this._entity = null;
+    this.isDynamic = false; // set by BodyBuilder.build()
+    this.density = 1.0;     // collider density (Rapier default) — fluids use it
   }
 
   bind(entity) {

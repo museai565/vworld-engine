@@ -124,3 +124,40 @@ export function axisToVec3(axis) {
   const a = toAxis(axis);
   return new THREE.Vector3(a === 'x' ? 1 : 0, a === 'y' ? 1 : 0, a === 'z' ? 1 : 0);
 }
+
+/**
+ * Normalize any box-like input into a fresh THREE.Box3.
+ * Accepts: Box3 (cloned) | [x0,y0,z0,x1,y1,z1] | { min, max } | { center, size }
+ * where min/max/center accept any toVec3 shape and size is a number or any
+ * toVec3 shape (a number = uniform cube).
+ */
+export function toBox3(v, name = 'box') {
+  if (!v || typeof v !== 'object') {
+    throw new Error(
+      `[VWorld] "${name}" must be a Box3, [x0,y0,z0,x1,y1,z1], { min, max }, or { center, size } — got ${describe(v)}.`
+    );
+  }
+  if (v.isBox3) return v.clone();
+  if (Array.isArray(v)) {
+    if (v.length !== 6 || !v.every((n) => typeof n === 'number')) {
+      throw new Error(`[VWorld] "${name}" as array must be [x0,y0,z0,x1,y1,z1] numbers — got ${JSON.stringify(v)}.`);
+    }
+    return new THREE.Box3(new THREE.Vector3(v[0], v[1], v[2]), new THREE.Vector3(v[3], v[4], v[5]));
+  }
+  if (v.min !== undefined && v.max !== undefined) {
+    const mn = toVec3(v.min), mx = toVec3(v.max);
+    return new THREE.Box3(
+      new THREE.Vector3(Math.min(mn.x, mx.x), Math.min(mn.y, mx.y), Math.min(mn.z, mx.z)),
+      new THREE.Vector3(Math.max(mn.x, mx.x), Math.max(mn.y, mx.y), Math.max(mn.z, mx.z))
+    );
+  }
+  if (v.center !== undefined) {
+    const c = toVec3(v.center);
+    const s = v.size === undefined ? 1 : v.size;
+    const half = typeof s === 'number' ? new THREE.Vector3(s / 2, s / 2, s / 2) : toVec3(s).multiplyScalar(0.5);
+    return new THREE.Box3(c.clone().sub(half), c.clone().add(half));
+  }
+  throw new Error(
+    `[VWorld] "${name}" must be a Box3, [x0,y0,z0,x1,y1,z1], { min, max }, or { center, size } — got ${describe(v)}.`
+  );
+}
