@@ -5,6 +5,7 @@ import { FluidSystem } from './Fluids.js';
 import { Pickup } from './Gameplay.js';
 import { buildPrefab, prefabNames, registerPrefabDef } from './Prefabs.js';
 import { serializeWorld, restoreWorld, ChunkManager, defaultChunkProvider } from './Persistence.js';
+import { Weather, WindSystem } from './Weather.js';
 
 /**
  * World — environment: sky dome, sun + hemisphere lights, fog, ground.
@@ -87,6 +88,18 @@ export class World {
     // --- v0.8.0: persistence ------------------------------------------------------
     this._ground = null;          // { size, color } — set by ground()
     this._chunkManagers = new Set();
+    // --- v0.9.0: weather & atmosphere --------------------------------------------
+    this._wind = new WindSystem();
+    this._weather = new Weather(this);
+    this._starsMat = makeStarsMaterial();
+    this._stars = new THREE.Points(makeStarsGeometry(), this._starsMat);
+    scene.add(this._stars);
+    this._moonMat = new THREE.MeshBasicMaterial({ color: 0xe9efff, transparent: true, opacity: 0, fog: false, depthWrite: false });
+    this._moon = new THREE.Mesh(new THREE.CircleGeometry(46, 32), this._moonMat);
+    this._moonHaloMat = new THREE.MeshBasicMaterial({ color: 0xbdd2ff, transparent: true, opacity: 0, fog: false, depthWrite: false });
+    this._moonHalo = new THREE.Mesh(new THREE.CircleGeometry(80, 32), this._moonHaloMat);
+    this._moon.add(this._moonHalo);
+    scene.add(this._moon);
   }
 
   /**
@@ -324,6 +337,37 @@ export class World {
   dayNight() {
     if (!this._dayNight) this._dayNight = new DayNightCycle(this);
     return this._dayNight;
+  }
+
+  /**
+   * Add a wind zone: world.wind({ at: [0,0,0], radius: 60, direction: 'E', strength: 3 }).
+   * direction: [x,z] | {x,z} | degrees (0° = +x east) | compass 'N'|'SE'|...
+   * Returns the zone (call .remove() to delete it).
+   */
+  wind(opts = {}) {
+    return this._wind.add(opts);
+  }
+
+  /** Remove every wind zone. Chainable. */
+  clearWind() {
+    this._wind.clear();
+    return this;
+  }
+
+  /**
+   * Wind vector at a position (any toVec3 shape) — summed zone contributions
+   * with smooth falloff. Game code can push particles, boats, flags, etc:
+   *   const w = world.windAt(player.position); // THREE.Vector3 (y = 0)
+   */
+  windAt(pos) {
+    const v = toVec3(pos);
+    const f = this._wind.at(v.x, v.z);
+    return new THREE.Vector3(f.x, 0, f.z);
+  }
+
+  /** The weather system (usually driven via app.weather(...)). */
+  weather() {
+    return this._weather;
   }
 
   /**
@@ -595,6 +639,7 @@ export class World {
     if (this._water) this._water.mat.uniforms.uTime.value += dt;
     this._fluidSystem.update(dt);
     for (const c of this._chunkManagers) c.update(dt);
+    this._weather.update(dt); // v0.9.0: precipitation, storms, fog
   }
 }
 
@@ -640,6 +685,32 @@ const PALETTES = {
 function smoothstep(a, b, x) {
   const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
   return t * t * (3 - 2 * t);
+}
+
+// --- v0.9.0: stars + moon ----------------------------------------------------------
+function makeStarsMaterial() {
+  return new THREE.PointsMaterial({
+    color: 0xffffff, size: 1.6, sizeAttenuation: false,
+    transparent: true, opacity: 0, depthWrite: false, fog: false,
+  });
+}
+
+function makeStarsGeometry() {
+  // 700 stars on the upper dome, deterministic-ish layout.
+  let s = 4242;
+  const rnd = () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  const pos = new Float32Array(700 * 3);
+  for (let i = 0; i < 700; i++) {
+    const theta = rnd() * Math.PI * 2;
+    const y = 0.08 + rnd() * 0.92;              // upper hemisphere
+    const r = Math.sqrt(Math.max(0, 1 - y * y));
+    pos[i * 3] = Math.cos(theta) * r * 1300;
+    pos[i * 3 + 1] = y * 1300;
+    pos[i * 3 + 2] = Math.sin(theta) * r * 1300;
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  return g;
 }
 
 class DayNightCycle {
@@ -702,5 +773,16 @@ class DayNightCycle {
     w.sun.color.copy(this._tmpSun);
     w.sun.intensity = i;
     w.hemi.intensity = hi;
+
+    // v0.9.0: stars + moon polish. Moon rides opposite the sun.
+    const nightF = smoothstep(0.06, -0.12, elev);
+    if (w._starsMat) w._starsMat.opacity = nightF * 0.9;
+    if (w._moon) {
+      const mElev = Math.max(-elev, 0.12);
+      w._moon.position.set(-Math.cos(angle) * R, mElev * R, -220);
+      w._moon.lookAt(0, 0, 0);
+      w._moonMat.opacity = nightF * 0.95;
+      w._moonHaloMat.opacity = nightF * 0.18;
+    }
   }
 }

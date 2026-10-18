@@ -172,6 +172,18 @@ export class Engine {
    * tracker. Created lazily; no-ops cleanly without a DOM.
    */
   hud(): Hud;
+
+  /**
+   * Weather control. No args returns the Weather system; with a kind it sets
+   * the weather and returns the app (chainable).
+   */
+  weather(): Weather;
+  weather(kind: WeatherKind | ({ kind: WeatherKind } & WeatherOptions), opts?: WeatherOptions): this;
+  /**
+   * Set the time of day: 0-24 or a name ('dawn', 'noon', 'dusk', 'midnight', ...).
+   * Chainable.
+   */
+  timeOfDay(hour: number | TimeOfDayName | string): this;
   /** Re-sync renderer size to the canvas. */
   resize(): this;
 }
@@ -557,7 +569,109 @@ export class World {
   chunks(options?: ChunkOptions): ChunkManager;
   /** Default chunk content providers ('props' scatters prefabs deterministically). */
   chunkProvider(kind?: string, options?: Record<string, unknown>): { load: ChunkLoadFn; unload: ChunkUnloadFn };
+
+  /**
+   * Add a wind zone. direction: [x,z] | {x,z} | degrees (0° = +x east) |
+   * compass 'N'|'SE'|... Returns the zone (call .remove() to delete it).
+   */
+  wind(options?: WindZoneOptions): WindZone;
+  /** Remove every wind zone. Chainable. */
+  clearWind(): this;
+  /**
+   * Wind vector at a position — summed zone contributions with smooth falloff.
+   * y is always 0.
+   */
+  windAt(pos: Vec3Input): THREE.Vector3;
+  /** The weather system (usually driven via app.weather(...)). */
+  weather(): Weather;
 }
+
+/** Weather kinds. */
+export type WeatherKind = 'rain' | 'snow' | 'storm' | 'fog' | 'clear';
+/** All supported weather kind names. */
+export declare const WEATHER_KINDS: WeatherKind[];
+
+export interface WeatherOptions {
+  intensity?: number;   // 0..1
+  area?: number;        // precipitation box size in meters
+  count?: number;       // particle count
+  height?: number;      // fall height in meters
+  seed?: number;
+  lightningRate?: number; // storm strikes/sec at intensity 1
+  fogDensity?: number;  // how dense 'fog' gets (0..1)
+  windScale?: number;   // wind influence on precipitation drift
+}
+
+export interface WindZoneOptions {
+  at?: Vec3Input;
+  radius?: number;
+  direction?: [number, number] | { x: number; z?: number } | number | string;
+  strength?: number;
+}
+
+export interface WindZone {
+  at: THREE.Vector3;
+  radius: number;
+  dirX: number;
+  dirZ: number;
+  strength: number;
+  remove(): void;
+}
+
+/** Live wind zone registry. */
+export class WindSystem {
+  add(options?: WindZoneOptions): WindZone;
+  remove(zone: WindZone): this;
+  clear(): this;
+  count(): number;
+  at(x: number, z: number): { x: number; z: number };
+}
+
+/**
+ * Weather — precipitation, storms, fog, and gameplay hooks.
+ * Get it via app.weather() / world.weather().
+ */
+export class Weather {
+  readonly kind: WeatherKind;
+  readonly intensity: number;
+  set(kind: WeatherKind | ({ kind: WeatherKind } & WeatherOptions), opts?: WeatherOptions): this;
+  clear(): this;
+  on(event: 'change' | 'lightning:strike', fn: (data: { kind?: WeatherKind; prev?: WeatherKind; intensity?: number; position?: [number, number, number] }) => void): this;
+  off(event: string, fn: (data: unknown) => void): this;
+  /** Force a lightning strike now. Returns { position }. */
+  strike(): { position: [number, number, number] };
+  /** Entity speed multiplier from weather (snow slows). */
+  speedMultiplier(): number;
+  /** Ground friction factor from weather (rain slicks). */
+  frictionFactor(): number;
+  dispose(): void;
+}
+
+/** Named times of day for app.timeOfDay(). */
+export declare const TIME_OF_DAY_NAMES: Record<string, number>;
+export type TimeOfDayName = 'midnight' | 'night' | 'dawn' | 'sunrise' | 'morning' | 'noon' | 'midday' | 'afternoon' | 'dusk' | 'sunset' | 'evening';
+
+export declare function normalizeWeatherKind(kind: unknown): WeatherKind;
+export declare function normalizeWeatherOptions(opts?: WeatherOptions): Required<WeatherOptions>;
+export declare function normalizeWindZone(opts?: WindZoneOptions): Omit<WindZone, 'remove'>;
+export declare function normalizeHour(hour: number | string): number;
+/** Sun direction for an hour (0..24): unit vector + elevation + isDay. */
+export declare function sunPositionAt(hour: number): { x: number; y: number; z: number; elevation: number; isDay: boolean };
+/** Interpolated sky grading keyframes for an hour (0..24). Colors are [r,g,b] 0..255. */
+export declare function skyKeyframeAt(hour: number): {
+  top: [number, number, number]; bottom: [number, number, number]; sun: [number, number, number];
+  sunI: number; hemiI: number; night: number; starAlpha: number;
+};
+/** Sky grading keyframe table (hour-keyed). */
+export declare const SKY_KEYFRAMES: Array<{ h: number; top: [number, number, number]; bottom: [number, number, number]; sun: [number, number, number]; sunI: number; hemiI: number }>;
+/** Sum wind zone contributions at a ground point. */
+export declare function windFieldAt(zones: Array<{ at?: { x: number; z: number }; radius: number; dirX: number; dirZ: number; strength: number }>, x: number, z: number): { x: number; z: number };
+/** Deterministic precipitation layout: Float32Array of [x, y, z, speed, phase] per particle. */
+export declare function precipitationSeed(count: number, area: number, height: number, seed?: number): Float32Array;
+export declare function snowSpeedMultiplier(intensity: number): number;
+export declare function rainFrictionFactor(intensity: number): number;
+export declare function rainVisibility(intensity: number): number;
+export declare function nextStrikeDelay(ratePerSec: number, rand?: number): number;
 
 export class DayNightCycle {
   speed(seconds: number): this;
@@ -575,6 +689,8 @@ export class AI {
 export class Agent {
   speed(v: number): this;
   bodyRadius(r: number): this;
+  /** Wind push factor for wander/follow drift (0 = immune). Default 0.25. */
+  windDrift(f: number): this;
   goto(dest: Vec3Input, options?: { arrive?: number; onArrive?: (agent: Agent) => void }): this;
   wander(area?: Record<string, unknown>): this;
   follow(target: Vec3Input | Entity, dist?: number): this;
@@ -1190,7 +1306,8 @@ export interface SaveData {
   fluidTypes: Array<{ name: string; def: Record<string, unknown> }>;
   fluids: Array<{ name: string; type: string; box: number[]; flow: number[]; overrides: Record<string, unknown> }>;
   dayNight: { t: number; dayLength: number; enabled: boolean } | null;
-  weather: null;
+  weather: { kind: string; intensity: number; options: Record<string, unknown> } | null;
+  winds: Array<{ at: [number, number, number]; radius: number; direction: [number, number]; strength: number }>;
   quests: QuestSummary[];
   pickups: Array<{
     kind: string; at: [number, number, number]; radius: number;

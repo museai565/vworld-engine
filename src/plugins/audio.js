@@ -19,7 +19,7 @@ import { toVec3, toNumber, withDefaults } from '../util/normalize.js';
  * Node-safe: every method degrades to a no-op with a warning.
  */
 
-const SYNTH = ['thud', 'click', 'pop', 'whoosh'];
+const SYNTH = ['thud', 'click', 'pop', 'whoosh', 'thunder'];
 
 export const AudioPlugin = {
   name: 'audio',
@@ -128,6 +128,19 @@ class AudioEngine {
       for (let i = 0; i < d.length; i++) {
         const t = i / sr;
         d[i] = Math.sin(2 * Math.PI * (300 + t * 1800) * t) * Math.exp(-t * 22) * 0.7;
+      }
+      return buf;
+    }
+    if (kind === 'thunder') {
+      // v0.9.0: thunder rumble — heavily low-passed noise, quick attack, long decay
+      const { buf, d } = mk(2.4);
+      let l = 0;
+      for (let i = 0; i < d.length; i++) {
+        const t = i / sr;
+        const n = Math.random() * 2 - 1;
+        l = l * 0.985 + n * 0.015;
+        const env = Math.exp(-t * 1.8) * Math.min(1, t * 8);
+        d[i] = l * env * 4;
       }
       return buf;
     }

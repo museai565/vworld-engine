@@ -42,6 +42,14 @@ import {
   prefabNames, prefabCategories, getPrefabDef, prefabVariantCount,
   selectVariant, registerPrefabDef, normalizePrefabCall,
 } from '../src/Prefabs.js';
+import {
+  Weather, WindSystem,
+  WEATHER_KINDS, TIME_OF_DAY_NAMES,
+  normalizeWeatherKind, normalizeWeatherOptions, normalizeWindZone, normalizeHour,
+  sunPositionAt, skyKeyframeAt,
+  windFieldAt, precipitationSeed,
+  snowSpeedMultiplier, rainFrictionFactor, rainVisibility, nextStrikeDelay,
+} from '../src/Weather.js';
 
 let pass = 0, fail = 0;
 const ok = (name, cond, extra = '') => {
@@ -910,16 +918,16 @@ console.log('== prefab registry (pure) ==');
 
 console.log('== save validation + migrations ==');
 {
-  ok('SAVE_VERSION is 8', SAVE_VERSION === 8);
+  ok('SAVE_VERSION is 9', SAVE_VERSION === 9);
   ok('null -> BAD_SAVE', throwsCode(() => validateSave(null), 'VWORLD/BAD_SAVE'));
   ok('{} -> BAD_SAVE', throwsCode(() => validateSave({}), 'VWORLD/BAD_SAVE'));
-  ok('version 9 -> SAVE_TOO_NEW', throwsCode(() => validateSave({ version: 9 }), 'VWORLD/SAVE_TOO_NEW'));
-  ok('bad entities -> SAVE_CORRUPT', throwsCode(() => validateSave({ version: 8, entities: 'x' }), 'VWORLD/SAVE_CORRUPT'));
-  ok('valid passes', validateSave({ version: 8, entities: [] }) === true);
+  ok('version 10 -> SAVE_TOO_NEW', throwsCode(() => validateSave({ version: 10 }), 'VWORLD/SAVE_TOO_NEW'));
+  ok('bad entities -> SAVE_CORRUPT', throwsCode(() => validateSave({ version: 9, entities: 'x' }), 'VWORLD/SAVE_CORRUPT'));
+  ok('valid passes', validateSave({ version: 9, entities: [] }) === true);
   const up = migrateSave({ version: 1, entities: [] });
-  ok('v1 -> v8', up.version === 8 && Array.isArray(up.quests) && Array.isArray(up.pickups) && up.weather === null && up.ground === null && Array.isArray(up.fluids));
+  ok('v1 -> v9', up.version === 9 && Array.isArray(up.quests) && Array.isArray(up.pickups) && up.weather === null && Array.isArray(up.winds) && up.ground === null && Array.isArray(up.fluids));
   const up3 = migrateSave({ version: 5, entities: [{ id: 'entity_9', transform: { p: [1, 2, 3] } }] });
-  ok('v5 entity normalized', up3.version === 8 && up3.entities[0].transform.q[3] === 1 && up3.entities[0].tags.length === 0 && up3.entities[0].prefab === null);
+  ok('v5 entity normalized', up3.version === 9 && up3.entities[0].transform.q[3] === 1 && up3.entities[0].tags.length === 0 && up3.entities[0].prefab === null);
   const n = normalizeEntityRecord({ prefab: 'rock', variant: '2', tags: 'x', inventory: [{ item: 'coin', qty: 3.7 }], health: { hp: 40 } });
   ok('record normalization', n.prefab === 'rock' && n.variant === 2 && n.tags.length === 0 && n.inventory[0].qty === 3 && n.health.max === 100 && n.props && n.transform.p[1] === 0);
 }
@@ -988,6 +996,122 @@ console.log('== reserveEntityIdsUpTo ==');
   reserveEntityIdsUpTo(9000);
   const e = new Entity();
   ok('id bumped past reserve', e.id === 'entity_9001', `got ${e.id}`);
+}
+
+console.log('== Weather pure helpers (v0.9.0) ==');
+{
+  ok('kinds list', WEATHER_KINDS.join(',') === 'rain,snow,storm,fog,clear');
+  ok('kind case-insensitive', normalizeWeatherKind('RAIN') === 'rain' && normalizeWeatherKind('Storm') === 'storm');
+  ok('bad kind throws coded', throwsCode(() => normalizeWeatherKind('hail'), 'VWORLD/BAD_WEATHER_KIND'));
+
+  const o = normalizeWeatherOptions();
+  ok('options defaults', o.intensity === 0.6 && o.count === 1500 && o.area === 120 && o.height === 40);
+  const o2 = normalizeWeatherOptions({ intensity: 5, count: 10.7, fogDensity: -1 });
+  ok('options clamped', o2.intensity === 1 && o2.count === 10 && o2.fogDensity === 0);
+
+  const noon = sunPositionAt(12);
+  ok('noon overhead', approx(noon.elevation, 1, 0.05) && noon.isDay === true);
+  const mid = sunPositionAt(0);
+  ok('midnight below', approx(mid.elevation, -1, 0.05) && mid.isDay === false);
+  const rise = sunPositionAt(6);
+  ok('sunrise horizon', Math.abs(rise.elevation) < 0.05);
+  ok('hour wraps', approx(sunPositionAt(36).elevation, sunPositionAt(12).elevation));
+  const dirLen = Math.hypot(noon.x, noon.y, noon.z);
+  ok('sun dir unit', approx(dirLen, 1));
+
+  const skyNoon = skyKeyframeAt(12);
+  ok('noon not night', skyNoon.night < 0.05 && skyNoon.starAlpha < 0.05 && skyNoon.sunI > 2);
+  const skyMid = skyKeyframeAt(0);
+  ok('midnight night', skyMid.night > 0.95 && skyMid.starAlpha > 0.9);
+  ok('sky colors are rgb triples', skyNoon.top.length === 3 && skyNoon.bottom.length === 3 && skyNoon.sun.length === 3);
+  const skyDawn = skyKeyframeAt(6.5);
+  ok('dawn warm', skyDawn.bottom[0] > 200 && skyDawn.bottom[2] < 150); // orange horizon
+
+  ok('snow slows', approx(snowSpeedMultiplier(0), 1) && approx(snowSpeedMultiplier(1), 0.55));
+  ok('rain slicks', approx(rainFrictionFactor(0), 1) && approx(rainFrictionFactor(1), 0.75));
+  ok('rain hides', rainVisibility(0) === 1 && rainVisibility(1) < 0.5);
+  ok('strike delay scales', nextStrikeDelay(1, 0.5) > nextStrikeDelay(4, 0.5) && nextStrikeDelay(1, 0.5) > 0);
+
+  ok('hour names', normalizeHour('dusk') === 18.5 && normalizeHour('noon') === 12 && normalizeHour('midnight') === 0);
+  ok('hour number', normalizeHour(7.5) === 7.5);
+  ok('bad hour name throws', throwsCode(() => normalizeHour('brunch'), 'VWORLD/BAD_HOUR'));
+  ok('hour out of range throws', throwsCode(() => normalizeHour(25), 'VWORLD/BAD_HOUR'));
+}
+
+console.log('== WindSystem (v0.9.0) ==');
+{
+  const w = new WindSystem();
+  ok('starts empty', w.count() === 0);
+  const z = w.add({ at: [0, 0, 0], radius: 10, direction: [1, 0], strength: 4 });
+  ok('zone added', w.count() === 1 && approx(z.dirX, 1) && approx(z.dirZ, 0));
+  const c = w.at(0, 0);
+  ok('center full strength', approx(c.x, 4) && approx(c.z, 0));
+  const edge = w.at(10, 0);
+  ok('edge zero', approx(edge.x, 0, 1e-9));
+  const midf = w.at(5, 0);
+  ok('falloff smooth', midf.x > 0 && midf.x < 4);
+  z.remove();
+  ok('zone removed', w.count() === 0 && w.at(0, 0).x === 0);
+
+  const z2 = w.add({ at: [0, 0, 0], radius: 10, direction: 90, strength: 2 }); // 90° = +z
+  ok('degrees direction', approx(z2.dirX, 0, 1e-9) && approx(z2.dirZ, 1));
+  const z3 = w.add({ at: [100, 0, 100], radius: 10, direction: 'NW', strength: 3 });
+  ok('compass direction', z3.dirX < 0 && z3.dirZ < 0);
+  const both = w.at(0, 0);
+  ok('zones sum', approx(both.z, 2));
+  ok('bad direction throws', throwsCode(() => w.add({ direction: 'up-ish' }), 'VWORLD/BAD_WIND'));
+  ok('zero direction throws', throwsCode(() => w.add({ direction: [0, 0] }), 'VWORLD/BAD_WIND'));
+  w.clear();
+  ok('clear', w.count() === 0);
+}
+
+console.log('== precipitationSeed (v0.9.0) ==');
+{
+  const a = precipitationSeed(100, 60, 30, 42);
+  const b = precipitationSeed(100, 60, 30, 42);
+  ok('deterministic', a.length === 500 && a.every((v, i) => v === b[i]));
+  const c = precipitationSeed(100, 60, 30, 43);
+  ok('seed matters', !a.every((v, i) => v === c[i]));
+  let inBounds = true;
+  for (let i = 0; i < 100; i++) {
+    if (Math.abs(a[i * 5]) > 30 || a[i * 5 + 1] < 0 || a[i * 5 + 1] > 30 || Math.abs(a[i * 5 + 2]) > 30) inBounds = false;
+  }
+  ok('in bounds', inBounds);
+  ok('empty count', precipitationSeed(0, 60, 30, 1).length === 0);
+}
+
+console.log('== Weather class (v0.9.0) ==');
+{
+  const fakeWorld = { engine: { scene: new THREE.Scene(), audio: null, camera: null } };
+  const wth = new Weather(fakeWorld);
+  ok('starts clear', wth.kind === 'clear' && wth.intensity === 0.6);
+  let changed = null;
+  wth.on('change', (d) => { changed = d; });
+  wth.set('rain', { intensity: 0.8, count: 60 });
+  ok('set rain', wth.kind === 'rain' && wth.intensity === 0.8);
+  ok('change emitted', changed && changed.kind === 'rain' && changed.prev === 'clear');
+  ok('rain slicks', wth.frictionFactor() < 1 && wth.speedMultiplier() === 1);
+  wth.set('snow');
+  ok('snow slows', wth.speedMultiplier() < 1 && wth.frictionFactor() === 1);
+  ok('object form', wth.set({ kind: 'fog', intensity: 0.9 }).kind === 'fog');
+  ok('bad kind throws', throwsCode(() => wth.set('hail'), 'VWORLD/BAD_WEATHER_KIND'));
+
+  let struck = null;
+  wth.on('lightning:strike', (d) => { struck = d; });
+  wth.set('storm', { count: 40 });
+  const s = wth.strike();
+  ok('strike emits position', struck && Array.isArray(struck.position) && struck.position.length === 3);
+  ok('strike returns position', s.position.length === 3 && s.position === struck.position);
+  wth.off('lightning:strike', () => {});
+  ok('clear resets', wth.clear().kind === 'clear');
+
+  // update loop advances without a camera
+  wth.set('storm', { count: 40, lightningRate: 1000 });
+  wth.update(0.016);
+  wth.update(5); // force timer-based strike path
+  ok('update runs', true);
+  wth.dispose();
+  ok('dispose clears precip', wth._precip === null);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

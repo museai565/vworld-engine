@@ -1,6 +1,6 @@
 {
   "name": "@vworld/engine",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "VWorld Engine \u2014 a Laravel-DX-flavored 3D game engine built on Three.js + Rapier physics",
   "type": "module",
   "main": "src/index.js",

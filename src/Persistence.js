@@ -30,7 +30,7 @@ import { BUILTIN_SURFACE_KIND_NAMES } from './Surfaces.js';
 // ---------------------------------------------------------------------------
 
 /** Current save-data version. Bump with a migration entry when the schema changes. */
-export const SAVE_VERSION = 8;
+export const SAVE_VERSION = 9;
 
 /**
  * Migration functions: MIGRATIONS[N] upgrades a v(N-1) save to vN.
@@ -51,6 +51,8 @@ export const MIGRATIONS = {
     ground: d.ground ?? null,
     entities: (d.entities ?? []).map(normalizeEntityRecord),
   }),
+  // v0.9.0: weather is filled in (was reserved null); wind zones persist too.
+  9: (d) => ({ ...d, version: 9, weather: d.weather ?? null, winds: d.winds ?? [] }),
 };
 
 /**
@@ -106,7 +108,7 @@ export function migrateSave(data) {
 }
 
 /**
- * Normalize one entity record to the full v8 shape (pure). Used by the v8
+ * Normalize one entity record to the full v9 shape (pure). Used by the v8
  * migration and by load() for forward tolerance of hand-written saves.
  */
 export function normalizeEntityRecord(rec = {}) {
@@ -224,7 +226,8 @@ export function serializeWorld(engine, options = {}) {
     fluidTypes: [],
     fluids: [],
     dayNight: null,
-    weather: null, // reserved for v0.9.0
+    weather: null,
+    winds: [],
     quests: [],
     pickups: [],
   };
@@ -264,6 +267,18 @@ export function serializeWorld(engine, options = {}) {
 
   const dn = world._dayNight;
   if (dn) data.dayNight = { t: dn.t, dayLength: dn.dayLength, enabled: dn.enabled };
+
+  // v0.9.0: weather + wind zones (was reserved as null in v0.8.0).
+  const wth = world._weather;
+  if (wth && wth.kind !== 'clear') {
+    data.weather = { kind: wth.kind, intensity: wth.o.intensity, options: { ...wth.o } };
+  }
+  data.winds = world._wind.zones.map((z) => ({
+    at: [z.at.x, z.at.y, z.at.z],
+    radius: z.radius,
+    direction: [z.dirX, z.dirZ],
+    strength: z.strength,
+  }));
 
   if (engine._quests) data.quests = engine._quests.list();
 
@@ -383,6 +398,18 @@ export function restoreWorld(engine, data, options = {}) {
     try {
       const dn = world.dayNight().time(d.dayNight.t).speed(d.dayNight.dayLength);
       if (d.dayNight.enabled === false) dn.pause(); else dn.resume();
+    } catch (err) { reportError(engine, err); }
+  }
+
+  // v0.9.0: weather + wind zones.
+  if (Array.isArray(d.winds)) {
+    for (const wz of d.winds) {
+      try { world.wind(wz); } catch (err) { reportError(engine, err); }
+    }
+  }
+  if (d.weather && d.weather.kind) {
+    try {
+      world.weather().set(d.weather.kind, { ...(d.weather.options ?? {}), intensity: d.weather.intensity ?? 0.6 });
     } catch (err) { reportError(engine, err); }
   }
 

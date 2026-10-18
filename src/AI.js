@@ -92,10 +92,17 @@ class Agent {
     this._wanderTimer = 0;
     this._onArrive = null;
     this.machine = null;
+    this._windDrift = 0.25; // v0.9.0: how strongly wind pushes wander/follow agents (0 = immune)
   }
 
   speed(v) { this.speedValue = toNumber(v, 'speed'); return this; }
   bodyRadius(r) { this.radius = toNumber(r, 'radius'); return this; }
+
+  /**
+   * Wind push factor for wander/follow drift (0 = immune). Chainable.
+   *   npc.windDrift(0);   // kites ignore the wind
+   */
+  windDrift(f) { this._windDrift = toNumber(f, 'windDrift'); return this; }
 
   /** One-shot move. `dest` accepts any toVec3 shape. */
   goto(dest, { arrive, onArrive } = {}) {
@@ -236,6 +243,16 @@ class Agent {
     // Rapier-aware: ray-cast so we slide along walls, never tunnel.
     const move = this.ai._collideMove(pos, _v2, stepLen, this.radius);
     pos.addScaledVector(move.dir, move.dist);
+
+    // v0.9.0: wind drift for wander/follow agents.
+    if ((this._mode === 'wander' || this._mode === 'follow') && this._windDrift > 0) {
+      const wz = this.engine.world._wind;
+      if (wz && wz.zones.length > 0) {
+        const f = wz.at(pos.x, pos.z);
+        pos.x += f.x * this._windDrift * dt;
+        pos.z += f.z * this._windDrift * dt;
+      }
+    }
 
     // Face travel direction.
     if (move.dir.lengthSq() > 1e-6) {

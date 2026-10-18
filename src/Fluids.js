@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { toVec3, toNumber, toBox3, withDefaults } from './util/normalize.js';
+import { windFieldAt } from './Weather.js';
 
 /**
  * Fluids — game fluids, not Navier-Stokes.
@@ -317,6 +318,15 @@ export class FluidSystem {
               body.raw.applyImpulse(
                 { x: fluid.flow.x * m * a * dt, y: 0, z: fluid.flow.z * m * a * dt }, true
               );
+            }
+            // v0.9.0: wind pushes the fluid surface (scaled per fluid type).
+            const wz = this.world._wind;
+            if (wz && wz.zones.length > 0) {
+              const wf = windFieldAt(wz.zones, (cache.box.min.x + cache.box.max.x) / 2, (cache.box.min.z + cache.box.max.z) / 2);
+              if (wf.x !== 0 || wf.z !== 0) {
+                const k = (def.windFactor ?? 0.12) * m * f * dt;
+                body.raw.applyImpulse({ x: wf.x * k, y: 0, z: wf.z * k }, true);
+              }
             }
             // Viscous drag (exponential, stable): v *= e^(-c·dt).
             const c = def.viscosity * f * 1.4;

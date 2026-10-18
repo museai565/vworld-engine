@@ -607,6 +607,46 @@ world.registerPrefab('statue', { category: 'decor', variants: 2,
 
 Prefabs are built from engine primitives + the v0.5.0 material presets, so they respect `app.material()` overrides and shadow settings. `entity.saveProps({ ... })` attaches custom data that `world.save()` captures.
 
+## Weather & atmosphere (v0.9.0)
+
+**Weather** — GPU precipitation (rain streaks / snow points, camera-following, deterministic layout), storms with lightning + positional thunder, and fog control. No assets needed:
+
+```js
+app.weather('rain', { intensity: 0.8 });
+app.weather('storm', { intensity: 1, lightningRate: 0.2 });
+app.weather('snow', { count: 2500, area: 160 });
+app.weather('fog', { fogDensity: 0.7 });
+app.weather('clear');
+
+app.weather().on('lightning:strike', ({ position }) => {
+  world.pickup({ kind: 'scorch', at: position }); // your call
+});
+app.weather().on('change', ({ kind, prev }) => hud.prompt(kind === 'storm' ? 'Take cover!' : ''));
+```
+
+**Wind zones** — directional wind fields with smooth falloff. They push precipitation, drift `wander`/`follow` AI agents, and add surface current to fluids:
+
+```js
+world.wind({ at: [0, 0, 0], radius: 60, direction: 'E', strength: 3 });
+// direction: [x,z] | {x,z} | degrees (0° = +x east) | compass 'N'|'SE'|...
+const w = world.windAt(player.position); // THREE.Vector3, y = 0
+npc.windDrift(0);                        // this agent ignores the wind
+world.clearWind();
+```
+
+**Time of day & sky polish** — named hours, stars at night, a moon that rides opposite the sun:
+
+```js
+app.timeOfDay(18.5);
+app.timeOfDay('dusk');      // midnight, dawn, sunrise, morning, noon, midday,
+                            // afternoon, sunset, evening, night...
+app.weather('storm').timeOfDay('dusk');  // chains — app.weather(kind) returns the app
+```
+
+**Gameplay hooks** — weather feeds back into simulation. Snow slows entities (`app.weather().speedMultiplier()`, 0.55x at full), rain slicks friction (`frictionFactor()`, 0.75x at full) and cuts visibility by tightening fog. Save data is now v9: weather + wind zones round-trip through `world.save()`/`world.load()` (v8 and older saves auto-migrate).
+
+Pure helpers are exported for game code: `sunPositionAt(hour)` (unit sun vector + elevation), `skyKeyframeAt(hour)` (interpolated grading keyframes with `night`/`starAlpha`), `windFieldAt(zones, x, z)`, `precipitationSeed(...)`, `snowSpeedMultiplier`, `rainFrictionFactor`, `rainVisibility`, `nextStrikeDelay`.
+
 ## Build helpers (game-layer primitives)
 
 ```js

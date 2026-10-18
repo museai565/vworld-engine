@@ -60,9 +60,18 @@ export {
   prefabNames, prefabCategories, getPrefabDef, prefabVariantCount,
   selectVariant, registerPrefabDef, normalizePrefabCall, buildPrefab,
 } from './Prefabs.js';
+// v0.9.0 — weather & atmosphere
+export {
+  Weather, WindSystem,
+  WEATHER_KINDS, TIME_OF_DAY_NAMES,
+  normalizeWeatherKind, normalizeWeatherOptions, normalizeWindZone, normalizeHour,
+  sunPositionAt, skyKeyframeAt, SKY_KEYFRAMES,
+  windFieldAt, precipitationSeed,
+  snowSpeedMultiplier, rainFrictionFactor, rainVisibility, nextStrikeDelay,
+} from './Weather.js';
 // v0.4.0 — production hardening
 export { Profiler } from './Profiler.js';
 export { VWorldError, vError, createErrorBus, reportError } from './util/errors.js';
 export { QUALITY_LEVELS, resolveQuality, normalizeQuality, autoStep } from './util/quality.js';
 
-export const VERSION = '0.8.0';
+export const VERSION = '0.9.0';

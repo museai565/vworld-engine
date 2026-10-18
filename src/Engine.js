@@ -17,6 +17,7 @@ import {
   makeMaterial, resolveShadowConfig,
 } from './Rendering.js';
 import { QuestLog, Dialogue, Hud } from './Gameplay.js';
+import { normalizeHour } from './Weather.js';
 
 /**
  * VWorld Engine — core application object.
@@ -456,6 +457,10 @@ export class Engine {
     }
     this.world._chunkManagers.clear();
 
+    // v0.9.0: weather teardown (removes precipitation, restores fog).
+    try { this.world._weather.dispose(); } catch (err) { this._errorBus.report(err); }
+    this.world._wind.clear();
+
     this.stop();
     const canvas = this.options.canvas;
     if (canvas) {
@@ -511,6 +516,35 @@ export class Engine {
   /** Add an Entity (or raw Object3D) to the scene. */
   add(thing) {
     this.scene.add(thing.object ?? thing);
+    return this;
+  }
+
+  // --- weather & atmosphere (v0.9.0) --------------------------------------------
+
+  /**
+   * Weather control. No args returns the Weather system; with a kind it sets
+   * the weather and returns the app (chainable).
+   *
+   *   app.weather('rain', { intensity: 0.8 });
+   *   app.weather('storm').timeOfDay('dusk');
+   *   app.weather().on('lightning:strike', ({ position }) => { ... });
+   *   app.weather().speedMultiplier(); // snow slowdown for entities
+   */
+  weather(kind, opts) {
+    if (kind === undefined) return this.world.weather();
+    this.world.weather().set(kind, opts);
+    return this;
+  }
+
+  /**
+   * Set the time of day. `hour`: 0-24 or a name ('dawn', 'noon', 'dusk',
+   * 'midnight', 'morning', 'afternoon', 'evening', ...). Chainable.
+   *
+   *   app.timeOfDay(18.5);
+   *   app.timeOfDay('midnight');
+   */
+  timeOfDay(hour) {
+    this.world.dayNight().time(normalizeHour(hour) / 24);
     return this;
   }
 
