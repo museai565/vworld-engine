@@ -1,5 +1,5 @@
 /**
- * VWorld Engine — TypeScript definitions (v0.5.0).
+ * VWorld Engine — TypeScript definitions (v0.8.0).
  *
  *   import { Engine, VWorldError, type QualityMode } from '@vworld/engine';
  *
@@ -227,6 +227,14 @@ export class Entity {
 
   on(event: 'collide' | `collide:${string}` | 'enter' | 'exit', fn: (...args: any[]) => void): this;
   off(event: string, fn: (...args: any[]) => void): this;
+
+  /**
+   * Custom data captured by `world.save()` and restored by `world.load()`.
+   * With no arguments, returns a copy of the current props.
+   */
+  saveProps(obj?: Record<string, unknown>): this | Record<string, unknown>;
+  /** Prefab info for entities built with world.prefab(): { name, variant } or null. */
+  prefabInfo(): { name: string; variant: number } | null;
 
   /** Animator for this entity — requires app.use(AnimationPlugin) first. */
   anim(): Animator;
@@ -519,6 +527,36 @@ export class World {
   pickup(options?: PickupOptions): Pickup;
   /** All live pickups. */
   readonly pickups: Pickup[];
+
+  /**
+   * Build a named prefab into a live entity. Prefab entities record their
+   * name + variant so world.save() / world.load() round-trips them exactly.
+   */
+  prefab(name: string | PrefabCall, opts?: number | PrefabOptions): Entity;
+  /** All prefab names (built-ins + registered customs), sorted. */
+  prefabNames(): string[];
+  /** Register a custom prefab. Chainable. */
+  registerPrefab(name: string, def: PrefabDef): this;
+
+  /** Serialize the whole world to a versioned plain-JSON object. */
+  save(options?: Record<string, unknown>): SaveData;
+  /**
+   * Restore a world from save data. Options: { clear?, height?, onEntity? }.
+   * Chainable.
+   */
+  load(data: SaveData, options?: {
+    clear?: boolean;
+    height?: (x: number, z: number) => number;
+    onEntity?: (record: EntityRecord, entity: Entity) => void;
+  }): this;
+
+  /**
+   * Stream chunk content by distance to a center point (camera by default).
+   * Emits 'chunk:load' / 'chunk:unload' on the returned manager.
+   */
+  chunks(options?: ChunkOptions): ChunkManager;
+  /** Default chunk content providers ('props' scatters prefabs deterministically). */
+  chunkProvider(kind?: string, options?: Record<string, unknown>): { load: ChunkLoadFn; unload: ChunkUnloadFn };
 }
 
 export class DayNightCycle {
@@ -932,6 +970,11 @@ export class Inventory {
   add(item: ItemInput, qty?: number): number;
   remove(item: ItemInput, qty?: number): number;
   clear(): this;
+  /**
+   * Restore a saved inventory snapshot (as produced by list()).
+   * Authoritative: bypasses capacity/maxSlots limits. Chainable.
+   */
+  restore(list: Array<{ item: string; qty: number }>): this;
 }
 
 export interface HealthEvent {
@@ -951,6 +994,8 @@ export class Health {
   off(event: string, fn: (...args: any[]) => void): this;
   damage(amount: number, source?: unknown): number;
   heal(amount: number): number;
+  /** Restore a saved health snapshot { hp, max }. Chainable. */
+  restore(snapshot?: { hp?: number | null; max?: number | null }): this;
 }
 
 export interface QuestObjectiveDef {
@@ -994,6 +1039,11 @@ export class QuestLog {
   objective(questId: string, objectiveId: string): QuestObjectiveState | null;
   reset(id: string): this;
   list(): QuestSummary[];
+  /**
+   * Restore saved quest snapshots (as produced by list()). Unknown ids are
+   * defined reward-less from the snapshot. Chainable.
+   */
+  restore(snapshots?: QuestSummary[]): this;
 }
 
 export interface DialogueChoice {
@@ -1108,3 +1158,135 @@ export class Hud {
 
 /** Engine version. */
 export declare const VERSION: string;
+
+// ---------------------------------------------------------------------------
+// v0.8.0 — persistence & streaming
+// ---------------------------------------------------------------------------
+
+/** Reserve entity ids up to `n` (used by world.load() for id stability). */
+export declare function reserveEntityIdsUpTo(n: number): void;
+
+/** One serialized entity. */
+export interface EntityRecord {
+  id: string | null;
+  prefab: string | null;
+  variant: number;
+  props: Record<string, unknown>;
+  transform: { p: [number, number, number]; q: [number, number, number, number]; s: [number, number, number] };
+  tags: string[];
+  inventory: Array<{ item: string; qty: number }> | null;
+  health: { hp: number; max: number } | null;
+}
+
+/** Versioned world save data, as produced by world.save(). */
+export interface SaveData {
+  version: number;
+  savedAt: string;
+  entities: EntityRecord[];
+  ground: { size: number; color: number } | null;
+  terrain: { size: number; resolution: number; surface: unknown } | null;
+  water: { level: number; color: number; waves: number; size: number; opacity: number } | null;
+  surfaces: Array<{ name: string; color: number; roughness: number }>;
+  fluidTypes: Array<{ name: string; def: Record<string, unknown> }>;
+  fluids: Array<{ name: string; type: string; box: number[]; flow: number[]; overrides: Record<string, unknown> }>;
+  dayNight: { t: number; dayLength: number; enabled: boolean } | null;
+  weather: null;
+  quests: QuestSummary[];
+  pickups: Array<{
+    kind: string; at: [number, number, number]; radius: number;
+    item: string | null; amount: number; heal: number; respawn: number; active: boolean;
+  }>;
+}
+
+/** Current save-data version. */
+export declare const SAVE_VERSION: number;
+/** Migration functions: MIGRATIONS[N] upgrades a v(N-1) save to vN. */
+export declare const MIGRATIONS: Record<number, (data: Record<string, unknown>) => Record<string, unknown>>;
+export declare function validateSave(data: unknown): true;
+export declare function migrateSave(data: Record<string, unknown>): SaveData;
+export declare function normalizeEntityRecord(rec?: Record<string, unknown>): EntityRecord;
+export declare function entityToRecord(entity: Entity): EntityRecord;
+export declare function applyRecordToEntity(entity: Entity, record: EntityRecord): Entity;
+export declare function serializeWorld(engine: Engine, options?: Record<string, unknown>): SaveData;
+export declare function restoreWorld(engine: Engine, data: SaveData, options?: Record<string, unknown>): World;
+
+/** One streamed chunk. */
+export interface Chunk {
+  cx: number;
+  cz: number;
+  key: string;
+  minX: number;
+  maxX: number;
+  minZ: number;
+  maxZ: number;
+  center: [number, number, number];
+}
+
+export type ChunkLoadFn = (chunk: Chunk) => unknown;
+export type ChunkUnloadFn = (chunk: Chunk, handle: unknown) => void;
+
+export interface ChunkOptions {
+  size?: number;
+  radius?: number;
+  center?: 'camera' | Entity | [number, number, number] | { x: number; z: number } | (() => unknown);
+  interval?: number;
+  load?: ChunkLoadFn;
+  unload?: ChunkUnloadFn;
+}
+
+export declare class ChunkManager {
+  constructor(world: World, options?: ChunkOptions);
+  on(event: 'chunk:load' | 'chunk:unload', fn: (chunk: Chunk) => void): this;
+  off(event: string, fn: (...args: unknown[]) => void): this;
+  readonly keys: string[];
+  readonly count: number;
+  update(dt: number): void;
+  recheck(): this;
+  dispose(): this;
+}
+
+export declare function defaultChunkProvider(
+  world: World, kind?: string, options?: Record<string, unknown>
+): { load: ChunkLoadFn; unload: ChunkUnloadFn };
+
+// Chunk math (pure).
+export declare function chunkIndex(x: number, z: number, size: number): { cx: number; cz: number };
+export declare function chunkKey(cx: number, cz: number): string;
+export declare function parseChunkKey(key: string): { cx: number; cz: number };
+export declare function chunkBounds(cx: number, cz: number, size: number): Omit<Chunk, 'cx' | 'cz' | 'key'>;
+export declare function chunksAround(cx: number, cz: number, radius: number): Array<{ cx: number; cz: number; key: string }>;
+export declare function diffChunkSets(prev: Iterable<string>, next: Iterable<string>): { added: string[]; removed: string[] };
+export declare function hashChunkKey(key: string): number;
+export declare function mulberry32(seed: number): () => number;
+export declare function resolveChunkCenter(center: unknown, world: World): { x: number; z: number };
+
+// Prefab library (pure parts + builders).
+export interface PrefabOptions {
+  variant?: number;
+  at?: Vec3Input;
+  rotateY?: number;
+  scale?: number | Vec3Input;
+  props?: Record<string, unknown>;
+}
+export interface PrefabCall extends PrefabOptions {
+  name?: string;
+  prefab?: string;
+}
+export interface PrefabDef {
+  category?: string;
+  variants?: number;
+  build: (world: World, entity: Entity, variant: number) => void;
+}
+export declare function prefabNames(): string[];
+export declare function prefabCategories(): string[];
+export declare function prefabVariantCount(name: string): number;
+export declare function selectVariant(name: string, variant?: number): number;
+export declare function registerPrefabDef(name: string, def: PrefabDef): string;
+export declare function normalizePrefabCall(name: string | PrefabCall, opts?: number | PrefabOptions): {
+  name: string; variant: number; at: Vec3Input | null; rotateY: number;
+  scale: number | Vec3Input | null; props: Record<string, unknown> | null;
+};
+export declare function buildPrefab(world: World, name: string | PrefabCall, opts?: number | PrefabOptions): Entity;
+
+/** Names of the built-in surface kinds. */
+export declare const BUILTIN_SURFACE_KIND_NAMES: string[];

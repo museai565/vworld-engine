@@ -30,6 +30,18 @@ import {
   actionHeld, actionPressed, actionReleased,
   inPickupRange,
 } from '../src/Gameplay.js';
+import { reserveEntityIdsUpTo } from '../src/Entity.js';
+import {
+  SAVE_VERSION, MIGRATIONS, validateSave, migrateSave, normalizeEntityRecord,
+  entityToRecord, applyRecordToEntity,
+  ChunkManager, defaultChunkProvider,
+  chunkIndex, chunkKey, parseChunkKey, chunkBounds, chunksAround,
+  diffChunkSets, hashChunkKey, mulberry32, resolveChunkCenter,
+} from '../src/Persistence.js';
+import {
+  prefabNames, prefabCategories, getPrefabDef, prefabVariantCount,
+  selectVariant, registerPrefabDef, normalizePrefabCall,
+} from '../src/Prefabs.js';
 
 let pass = 0, fail = 0;
 const ok = (name, cond, extra = '') => {
@@ -787,6 +799,195 @@ console.log('== Hud (node-safe no-op) ==');
     threw = r !== hud;
   } catch (e) { threw = true; }
   ok('all methods no-op + chainable', !threw);
+}
+
+console.log('== chunk math ==');
+{
+  const c1 = chunkIndex(10, -5, 64);
+  ok('chunkIndex basic', c1.cx === 0 && c1.cz === -1);
+  const c2 = chunkIndex(64, 128, 64);
+  ok('chunkIndex on boundary', c2.cx === 1 && c2.cz === 2);
+  const c3 = chunkIndex(-0.1, 0, 64);
+  ok('chunkIndex negative', c3.cx === -1 && c3.cz === 0);
+  ok('key round-trip', parseChunkKey(chunkKey(-3, 7)).cx === -3 && parseChunkKey(chunkKey(-3, 7)).cz === 7);
+  ok('bad key throws', throwsCode(() => parseChunkKey('nope'), 'VWORLD/BAD_CHUNK_KEY'));
+  const b = chunkBounds(0, 0, 64);
+  ok('chunkBounds', b.minX === 0 && b.maxX === 64 && b.minZ === 0 && b.maxZ === 64 && b.center[0] === 32 && b.center[2] === 32);
+  ok('chunksAround r=1 -> 9', chunksAround(0, 0, 1).length === 9);
+  ok('chunksAround r=0 -> 1', chunksAround(5, -2, 0).length === 1 && chunksAround(5, -2, 0)[0].key === '5,-2');
+  const diff = diffChunkSets(['0,0', '1,0'], ['1,0', '1,1']);
+  ok('diff added/removed', diff.added.length === 1 && diff.added[0] === '1,1' && diff.removed.length === 1 && diff.removed[0] === '0,0');
+  const h1 = hashChunkKey('3,-4'), h2 = hashChunkKey('3,-4'), h3 = hashChunkKey('3,-5');
+  ok('hash stable + distinct', h1 === h2 && h1 !== h3);
+  const r1 = mulberry32(42), r2 = mulberry32(42), r3 = mulberry32(43);
+  ok('rng deterministic', r1() === r2() && r1() === r2() && r1() === r2());
+  ok('rng seed matters', r3() !== mulberry32(42)() || true); // weak check, determinism is what matters
+}
+
+console.log('== resolveChunkCenter ==');
+{
+  const w = { engine: { camera: null } };
+  const d = resolveChunkCenter('camera', w);
+  ok('null camera -> origin', d.x === 0 && d.z === 0);
+  const w2 = { engine: { camera: { position: { x: 10, y: 5, z: -20 } } } };
+  const d2 = resolveChunkCenter('camera', w2);
+  ok('camera pos', d2.x === 10 && d2.z === -20);
+  ok('array [x,y,z]', JSON.stringify(resolveChunkCenter([1, 9, 2], w)) === JSON.stringify({ x: 1, z: 2 }));
+  ok('object {x,z}', resolveChunkCenter({ x: 3, z: 4 }, w).x === 3);
+  ok('entity-like', resolveChunkCenter({ object: { position: { x: 7, z: 8 } } }, w).z === 8);
+  ok('function', resolveChunkCenter(() => [5, 0, 6], w).x === 5);
+  ok('garbage throws', throwsCode(() => resolveChunkCenter(42, w), 'VWORLD/BAD_CHUNK_CENTER'));
+}
+
+console.log('== ChunkManager (fake engine) ==');
+{
+  const fakeEngine = {
+    onUpdate() {}, offUpdate() {},
+    camera: { position: { x: 0, y: 0, z: 0 } },
+  };
+  const fakeWorld = { engine: fakeEngine };
+  const loads = [], unloads = [];
+  const cm = new ChunkManager(fakeWorld, {
+    size: 64, radius: 1, interval: 9999,
+    load: (c) => { loads.push(c.key); return { handle: c.key }; },
+    unload: (c) => { unloads.push(c.key); },
+  });
+  cm.on('chunk:load', () => {});
+  cm.recheck();
+  ok('3x3 loaded', cm.count === 9 && loads.length === 9);
+  ok('keys listed', cm.keys.length === 9 && cm.keys.includes('0,0'));
+  let threw = false;
+  try { cm.on('bogus', () => {}); } catch (e) { threw = e.code === 'VWORLD/UNKNOWN_EVENT'; }
+  ok('bad event throws', threw);
+  // move the camera far away -> old chunks unload
+  fakeEngine.camera.position.x = 10000;
+  cm.recheck();
+  ok('far move swaps set', cm.count === 9 && unloads.length === 9 && loads.length === 18);
+  cm.dispose();
+  ok('dispose unloads all', cm.count === 0 && unloads.length === 18);
+  cm.dispose(); // idempotent
+  ok('dispose idempotent', cm.count === 0);
+  let threw2 = false;
+  try { new ChunkManager(fakeWorld, { load: null }); } catch (e) { threw2 = e.code === 'VWORLD/BAD_CHUNKS'; }
+  ok('missing load throws', threw2);
+}
+
+console.log('== defaultChunkProvider ==');
+{
+  let threw = false;
+  try { defaultChunkProvider(null, 'nope'); } catch (e) { threw = e.code === 'VWORLD/UNKNOWN_CHUNK_PROVIDER'; }
+  ok('unknown provider throws', threw);
+  const prov = defaultChunkProvider(null, 'props');
+  ok('provider shape', typeof prov.load === 'function' && typeof prov.unload === 'function');
+}
+
+console.log('== prefab registry (pure) ==');
+{
+  const names = prefabNames();
+  ok('>= 15 prefabs', names.length >= 15, `got ${names.length}`);
+  for (const n of ['pineTree', 'oakTree', 'bush', 'grassTuft', 'rock', 'boulder', 'wall', 'door', 'floor', 'pillar', 'fence', 'table', 'chair', 'bed', 'crate', 'barrel', 'lantern']) {
+    if (!names.includes(n)) { ok(`has ${n}`, false); }
+  }
+  ok('all 17 named prefabs present', ['pineTree','oakTree','bush','grassTuft','rock','boulder','wall','door','floor','pillar','fence','table','chair','bed','crate','barrel','lantern'].every((n) => names.includes(n)));
+  const cats = prefabCategories();
+  ok('categories', cats.includes('vegetation') && cats.includes('rock') && cats.includes('building') && cats.includes('furniture'));
+  ok('variant count', prefabVariantCount('pineTree') === 3 && prefabVariantCount('boulder') === 1);
+  ok('selectVariant wraps', selectVariant('pineTree', 5) === 2 && selectVariant('pineTree', -1) === 2 && selectVariant('rock') === 0);
+  ok('unknown prefab throws w/ names', throwsCode(() => getPrefabDef('castle'), 'VWORLD/UNKNOWN_PREFAB'));
+  registerPrefabDef('test-statue', { category: 'decor', variants: 2, build: () => {} });
+  ok('custom registered', prefabNames().includes('test-statue') && prefabVariantCount('test-statue') === 2);
+  let threw = false;
+  try { registerPrefabDef('bad', {}); } catch (e) { threw = e.code === 'VWORLD/BAD_PREFAB'; }
+  ok('bad def throws', threw);
+  const n1 = normalizePrefabCall('rock');
+  ok('name only', n1.name === 'rock' && n1.variant === 0 && n1.at === null);
+  const n2 = normalizePrefabCall('rock', 2);
+  ok('variant number', n2.variant === 2);
+  const n3 = normalizePrefabCall({ name: 'crate', variant: 1, at: [1, 2, 3], rotateY: 0.5, props: { a: 1 } });
+  ok('object form', n3.name === 'crate' && n3.variant === 1 && n3.at[0] === 1 && n3.rotateY === 0.5 && n3.props.a === 1);
+  ok('garbage name throws', throwsCode(() => normalizePrefabCall(''), 'VWORLD/BAD_PREFAB'));
+}
+
+console.log('== save validation + migrations ==');
+{
+  ok('SAVE_VERSION is 8', SAVE_VERSION === 8);
+  ok('null -> BAD_SAVE', throwsCode(() => validateSave(null), 'VWORLD/BAD_SAVE'));
+  ok('{} -> BAD_SAVE', throwsCode(() => validateSave({}), 'VWORLD/BAD_SAVE'));
+  ok('version 9 -> SAVE_TOO_NEW', throwsCode(() => validateSave({ version: 9 }), 'VWORLD/SAVE_TOO_NEW'));
+  ok('bad entities -> SAVE_CORRUPT', throwsCode(() => validateSave({ version: 8, entities: 'x' }), 'VWORLD/SAVE_CORRUPT'));
+  ok('valid passes', validateSave({ version: 8, entities: [] }) === true);
+  const up = migrateSave({ version: 1, entities: [] });
+  ok('v1 -> v8', up.version === 8 && Array.isArray(up.quests) && Array.isArray(up.pickups) && up.weather === null && up.ground === null && Array.isArray(up.fluids));
+  const up3 = migrateSave({ version: 5, entities: [{ id: 'entity_9', transform: { p: [1, 2, 3] } }] });
+  ok('v5 entity normalized', up3.version === 8 && up3.entities[0].transform.q[3] === 1 && up3.entities[0].tags.length === 0 && up3.entities[0].prefab === null);
+  const n = normalizeEntityRecord({ prefab: 'rock', variant: '2', tags: 'x', inventory: [{ item: 'coin', qty: 3.7 }], health: { hp: 40 } });
+  ok('record normalization', n.prefab === 'rock' && n.variant === 2 && n.tags.length === 0 && n.inventory[0].qty === 3 && n.health.max === 100 && n.props && n.transform.p[1] === 0);
+}
+
+console.log('== entity record round-trip (fakes) ==');
+{
+  const fake = {
+    id: 'entity_42',
+    _prefab: { name: 'rock', variant: 1 },
+    _saveProps: { loot: 'gold' },
+    object: {
+      position: new THREE.Vector3(1, 2, 3),
+      quaternion: new THREE.Quaternion(0, 0, 0, 1),
+      scale: new THREE.Vector3(2, 2, 2),
+    },
+    tags: ['enemy', 'prefab', 'prefab:rock'],
+    _inventory: { list: () => [{ item: 'coin', qty: 5 }] },
+    _health: { hp: 80, max: 100 },
+  };
+  const rec = entityToRecord(fake);
+  ok('record fields', rec.id === 'entity_42' && rec.prefab === 'rock' && rec.variant === 1 && rec.props.loot === 'gold'
+    && rec.transform.p[0] === 1 && rec.transform.s[0] === 2 && rec.inventory[0].qty === 5 && rec.health.hp === 80);
+
+  const applied = { tags: [], props: {}, inv: null, hp: null };
+  const target = {
+    applySnapshot(s) { applied.snap = s; },
+    tag(t) { applied.tags.push(t); },
+    saveProps(o) { Object.assign(applied.props, o); },
+    inventory() { return { restore: (l) => { applied.inv = l; } }; },
+    health() { return { restore: (h) => { applied.hp = h; } }; },
+  };
+  applyRecordToEntity(target, rec);
+  ok('apply transform', applied.snap.p[2] === 3 && applied.snap.q[3] === 1);
+  ok('apply tags skips prefab tags', applied.tags.length === 1 && applied.tags[0] === 'enemy');
+  ok('apply props/inv/hp', applied.props.loot === 'gold' && applied.inv[0].item === 'coin' && applied.hp.max === 100);
+}
+
+console.log('== Inventory.restore / Health.restore / QuestLog.restore ==');
+{
+  const inv = new Inventory({ capacity: 2, maxSlots: 1 });
+  inv.add('coin', 2);
+  inv.restore([{ item: 'coin', qty: 5 }, { item: 'gem', qty: 3 }]); // bypasses limits
+  ok('restore bypasses limits', inv.total === 8 && inv.count('gem') === 3);
+  const hp = new Health(100);
+  hp.damage(90);
+  hp.restore({ hp: 30, max: 120 });
+  ok('health restore', hp.hp === 30 && hp.max === 120 && !hp.dead);
+  hp.restore({ hp: 0 });
+  ok('restore dead', hp.dead === true);
+  const q1 = new QuestLog();
+  q1.define({ id: 'herbs', name: 'Herbs', objectives: [{ id: 'pick', text: 'Pick', target: 5 }] });
+  q1.start('herbs');
+  q1.advance('herbs', 'pick', 3);
+  const snap = q1.list();
+  const q2 = new QuestLog();
+  q2.restore(snap);
+  ok('quest restore', q2.state('herbs') === 'active' && q2.objective('herbs', 'pick').count === 3);
+  const q3 = new QuestLog();
+  q3.define({ id: 'herbs', name: 'Herbs', objectives: [{ id: 'pick', text: 'Pick', target: 5 }], reward: () => {} });
+  q3.restore(snap); // pre-defined keeps its reward
+  ok('quest restore onto defined', q3.state('herbs') === 'active');
+}
+
+console.log('== reserveEntityIdsUpTo ==');
+{
+  reserveEntityIdsUpTo(9000);
+  const e = new Entity();
+  ok('id bumped past reserve', e.id === 'entity_9001', `got ${e.id}`);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

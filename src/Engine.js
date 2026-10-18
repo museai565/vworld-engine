@@ -450,6 +450,12 @@ export class Engine {
       this._hud = null;
     }
 
+    // v0.8.0: stop chunk streaming (unloads every chunk).
+    for (const c of [...this.world._chunkManagers]) {
+      try { c.dispose(); } catch (err) { this._errorBus.report(err); }
+    }
+    this.world._chunkManagers.clear();
+
     this.stop();
     const canvas = this.options.canvas;
     if (canvas) {

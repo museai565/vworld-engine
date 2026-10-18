@@ -3,6 +3,8 @@ import { toVec3, toNumber, withDefaults } from './util/normalize.js';
 import { SurfaceKinds, buildAtlas, buildSplatMaterial, evaluateRuleWeight, compositeWeights, MAX_SURFACE_LAYERS } from './Surfaces.js';
 import { FluidSystem } from './Fluids.js';
 import { Pickup } from './Gameplay.js';
+import { buildPrefab, prefabNames, registerPrefabDef } from './Prefabs.js';
+import { serializeWorld, restoreWorld, ChunkManager, defaultChunkProvider } from './Persistence.js';
 
 /**
  * World — environment: sky dome, sun + hemisphere lights, fog, ground.
@@ -82,6 +84,9 @@ export class World {
     this._fluidSystem = new FluidSystem(this);
     // --- v0.7.0: pickups ----------------------------------------------------------
     this._pickups = [];
+    // --- v0.8.0: persistence ------------------------------------------------------
+    this._ground = null;          // { size, color } — set by ground()
+    this._chunkManagers = new Set();
   }
 
   /**
@@ -144,6 +149,107 @@ export class World {
     return [...this._pickups];
   }
 
+  // --- prefabs (v0.8.0) ------------------------------------------------------------
+  /**
+   * Build a named prefab into a live entity (vegetation, rocks, building
+   * parts, furniture). Prefab entities record their name + variant, so
+   * world.save() / world.load() round-trips them exactly.
+   *
+   *   world.prefab('pineTree');
+   *   world.prefab('rock', 2);                                   // variant as number
+   *   world.prefab('lantern', { variant: 1, at: [4, 0, -2], rotateY: 0.5 });
+   *   world.prefab({ name: 'crate', at: [0, 0, 5], props: { loot: 'gold' } });
+   */
+  prefab(name, opts) {
+    return buildPrefab(this, name, opts);
+  }
+
+  /** All prefab names (built-ins + registered customs), sorted. */
+  prefabNames() {
+    return prefabNames();
+  }
+
+  /**
+   * Register a custom prefab: `world.registerPrefab('statue', {
+   *   category: 'decor', variants: 2,
+   *   build: (world, entity, variant) => { ... },
+   * })`. Chainable.
+   */
+  registerPrefab(name, def) {
+    registerPrefabDef(name, def);
+    return this;
+  }
+
+  // --- persistence (v0.8.0) --------------------------------------------------------
+  /**
+   * Serialize the whole world to a versioned plain-JSON object:
+   * entities (transform, tags, props, inventory, health), ground/terrain/
+   * water config, custom surface kinds + fluid types, fluid volumes, day/
+   * night state, quest states, pickups. Entities tagged 'nosave' are
+   * skipped (their configs are captured in the dedicated sections).
+   *
+   *   const data = world.save();
+   *   localStorage.setItem('slot1', JSON.stringify(data));
+   */
+  save(options) {
+    return serializeWorld(this.engine, options);
+  }
+
+  /**
+   * Restore a world from save data (as produced by world.save()).
+   * Older versions auto-upgrade with a warning; corrupt data throws a coded
+   * VWorldError (VWORLD/BAD_SAVE, VWORLD/SAVE_TOO_NEW, VWORLD/SAVE_CORRUPT).
+   *
+   *   world.load(JSON.parse(localStorage.getItem('slot1')));
+   *   world.load(data, { clear: false });            // additive restore
+   *   world.load(data, { height: (x, z) => hills }); // terrain relief —
+   *                                                  // height functions
+   *                                                  // can't be serialized
+   *   world.load(data, { onEntity: (rec, entity) => attachVisuals(rec, entity) });
+   *
+   * Prefab entities rebuild exactly. Non-prefab entities restore transform,
+   * tags, props, inventory, and health — their visuals must be rebuilt by
+   * game code via `onEntity` (or by making them prefabs). Chainable.
+   */
+  load(data, options) {
+    restoreWorld(this.engine, data, options);
+    return this;
+  }
+
+  // --- chunk streaming (v0.8.0) ----------------------------------------------------
+  /**
+   * Stream chunk content by distance to a center point (the camera by
+   * default). Emits 'chunk:load' / 'chunk:unload' on the returned manager.
+   *
+   *   const stream = world.chunks({ size: 64, radius: 2,
+   *                                 ...world.chunkProvider('props') });
+   *   // ...or fully custom:
+   *   const stream = world.chunks({ size: 64, radius: 2,
+   *     load: (chunk) => spawnStuff(chunk),       // returns a handle
+   *     unload: (chunk, handle) => despawn(handle),
+   *     center: player,                            // Entity | [x, z] | fn
+   *   });
+   *   stream.on('chunk:load', (chunk) => console.log('in', chunk.key));
+   *   stream.dispose(); // unload everything, stop ticking
+   */
+  chunks(options = {}) {
+    const m = new ChunkManager(this, options);
+    this._chunkManagers.add(m);
+    return m;
+  }
+
+  /**
+   * Default chunk content providers. 'props' (alias 'scatter') places
+   * prefabs deterministically per chunk — the same seed every session, so
+   * nothing pops in differently on reload.
+   *
+   *   world.chunks({ size: 64, radius: 2,
+   *     ...world.chunkProvider('props', { kinds: ['pineTree', 'oakTree'], perChunk: 30 }) });
+   */
+  chunkProvider(kind = 'props', options = {}) {
+    return defaultChunkProvider(this, kind, options);
+  }
+
   // --- scatterable prop kinds ----------------------------------------------------
   _registerBuiltinKinds() {
     const rnd = (a, b) => a + Math.random() * (b - a);
@@ -197,10 +303,12 @@ export class World {
 
   /**
    * Add a static ground plane with a matching physics collider.
-   * y=0 is the top surface of the ground.
+   * y=0 is the top surface of the ground. The config (not the entity) is
+   * what world.save() captures — the entity itself is tagged 'nosave'.
    */
   ground({ size = 200, color = 0x4d7c43 } = {}) {
     const e = this.engine.entity().box(size, 1, size, color).at(0, -0.5, 0);
+    e.tag('nosave');
     e.object.traverse((o) => { if (o.isMesh) o.castShadow = false; });
     this.engine.physics
       .body().static()
@@ -208,6 +316,7 @@ export class World {
       .at(0, -0.5, 0)
       .friction(0.9)
       .build();
+    this._ground = { size, color };
     return e;
   }
 
@@ -485,6 +594,7 @@ export class World {
     if (this._dayNight) this._dayNight.update(dt);
     if (this._water) this._water.mat.uniforms.uTime.value += dt;
     this._fluidSystem.update(dt);
+    for (const c of this._chunkManagers) c.update(dt);
   }
 }
 

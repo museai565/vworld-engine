@@ -179,6 +179,22 @@ export class Inventory {
     this._emitter.emit('change', { item: null, qty: 0, delta: 0, total: 0, action: 'clear' });
     return this;
   }
+
+  /**
+   * Restore a saved inventory snapshot (as produced by list()).
+   * Authoritative: bypasses capacity/maxSlots limits — the data was valid
+   * when it was saved. Chainable.
+   */
+  restore(list) {
+    this._stacks.clear();
+    for (const s of list ?? []) {
+      const id = normalizeItemId(s.item ?? s.id);
+      const qty = Math.max(0, Math.floor(Number(s.qty ?? s.count ?? 0)));
+      if (qty > 0) this._stacks.set(id, (this._stacks.get(id) ?? 0) + qty);
+    }
+    this._emitter.emit('change', { item: null, qty: 0, delta: 0, total: this.total, action: 'restore' });
+    return this;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -243,6 +259,18 @@ export class Health {
       this._emitter.emit('death', { hp: 0, max: this.max, source });
     }
     return applied;
+  }
+
+  /** Restore a saved health snapshot { hp, max }. Chainable. */
+  restore({ hp = null, max = null } = {}) {
+    if (max !== null && max !== undefined) {
+      const m = toNumber(max, 'max');
+      if (!(m > 0)) throw vError('VWORLD/BAD_HEALTH', `[VWorld] Health.restore() max must be > 0 — got ${max}.`);
+      this.max = m;
+    }
+    this._hp = hp === null || hp === undefined ? this.max : Math.min(this.max, Math.max(0, toNumber(hp, 'hp')));
+    this._dead = this._hp <= 0;
+    return this;
   }
 
   /** Restore health (clamped to max). Healing above 0 revives. Returns amount restored. */
@@ -396,6 +424,36 @@ export class QuestLog {
   /** All quests as [{ id, name, state, objectives: [{...done}] }]. */
   list() {
     return [...this._quests.values()].map((q) => this._summary(q));
+  }
+
+  /**
+   * Restore saved quest snapshots (as produced by list()). Unknown ids are
+   * defined reward-less from the snapshot (with a warning — re-define quests
+   * with their reward functions *before* world.load() to keep rewards).
+   * States and objective progress are applied authoritatively. Chainable.
+   */
+  restore(snapshots = []) {
+    for (const s of snapshots ?? []) {
+      if (!s || typeof s !== 'object' || !s.id) continue;
+      const id = String(s.id);
+      if (!this._quests.has(id)) {
+        console.warn(`[VWorld] Quest "${id}" was not defined — restoring definition without its reward. Define quests before world.load() to keep rewards.`);
+        this.define({
+          id,
+          name: s.name ?? id,
+          objectives: (s.objectives ?? []).map((o) => ({ id: o.id, text: o.text ?? o.id, target: o.target ?? 1 })),
+        });
+      }
+      const q = this._quests.get(id);
+      if (['locked', 'active', 'complete'].includes(s.state)) q.state = s.state;
+      for (const o of s.objectives ?? []) {
+        if (o && o.id !== undefined && q.progress.has(String(o.id))) {
+          const obj = q.def.objectives.find((x) => x.id === String(o.id));
+          q.progress.set(String(o.id), Math.min(obj?.target ?? 1, Math.max(0, Math.floor(Number(o.count ?? 0)))));
+        }
+      }
+    }
+    return this;
   }
 
   _summary(q) {
@@ -799,6 +857,7 @@ export class Pickup {
   _buildVisual(meshOpt) {
     const engine = this.engine;
     const e = engine.entity();
+    e.tag('nosave'); // visuals are rebuilt from the pickup record on world.load()
     if (meshOpt && typeof meshOpt === 'object' && meshOpt.isObject3D) {
       e.object.add(meshOpt);
     } else {

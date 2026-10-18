@@ -8,6 +8,15 @@ let _nextId = 1;
 let _destroyWarned = false;
 const _lodTmp = new THREE.Vector3();
 
+/**
+ * Reserve entity ids up to `n` (used by world.load() to keep restored ids
+ * collision-free with future entities).
+ */
+export function reserveEntityIdsUpTo(n) {
+  const m = Math.floor(Number(n));
+  if (Number.isFinite(m) && m >= _nextId) _nextId = m + 1;
+}
+
 function stdMaterial(color) {
   return new THREE.MeshStandardMaterial({ color, roughness: 0.7, metalness: 0.05 });
 }
@@ -37,6 +46,8 @@ export class Entity {
     this._lod = null;             // { levels, ticker } — set by lod()
     this._inventory = null;       // lazy Inventory — see inventory()
     this._health = null;          // lazy Health — see health()
+    this._prefab = null;          // { name, variant } — set by world.prefab()
+    this._saveProps = {};         // custom data captured by world.save()
   }
 
   // --- tags --------------------------------------------------------------------
@@ -383,6 +394,27 @@ export class Entity {
       console.warn('[VWorld] entity.destroy() is deprecated — use entity.dispose() instead.');
     }
     return this.dispose();
+  }
+
+  // --- persistence (v0.8.0) ------------------------------------------------------------
+  /**
+   * Custom data captured by `world.save()` and restored by `world.load()`.
+   * With no arguments, returns a copy of the current props.
+   *
+   *   chest.saveProps({ loot: 'gold', locked: true });
+   */
+  saveProps(obj) {
+    if (obj === undefined) return { ...this._saveProps };
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+      throw new Error('[VWorld] entity.saveProps() needs a plain object — got ' + (obj === null ? 'null' : typeof obj) + '.');
+    }
+    Object.assign(this._saveProps, obj);
+    return this;
+  }
+
+  /** Prefab info for entities built with world.prefab(): { name, variant } or null. */
+  prefabInfo() {
+    return this._prefab ? { ...this._prefab } : null;
   }
 
   // --- networking seam ---------------------------------------------------------

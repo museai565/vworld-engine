@@ -225,7 +225,23 @@ window.addEventListener('keydown', (e) => {
     app.audio.play('pop', { at: [x, 6, z], volume: 0.7 });
   }
   if (e.code === 'KeyM') app.audio.mute(!app.audio.muted);       // mute toggle
+  if (e.code === 'KeyP') {                                       // v0.8.0: save -> load round-trip
+    try {
+      const data = app.world.save();
+      console.log('[demo] saved', data.entities.length, 'entities');
+      app.world.load(data, { height }); // height fns can't serialize — pass it back
+      console.log('[demo] reloaded — prefabs and props restored');
+    } catch (err) { console.error('[demo] save/load failed', err); }
+  }
 });
+
+// --- v0.8.0: prefab props near spawn + deterministic chunk streaming -------------------------------
+app.world.prefab('lantern', { at: [3, 0, 8] });
+app.world.prefab('crate', { variant: 1, at: [-4, 0, 6], props: { loot: 'gold' } });
+app.world.prefab('barrel', { at: [-5.2, 0, 6] });
+const stream = app.world.chunks({ size: 64, radius: 1, ...app.world.chunkProvider('props', { kinds: ['pineTree', 'rock', 'bush'], perChunk: 18 }) });
+stream.on('chunk:load', (c) => console.log('[demo] chunk in', c.key));
+stream.on('chunk:unload', (c) => console.log('[demo] chunk out', c.key));
 
 // --- go ------------------------------------------------------------------------------------------
 app.start();

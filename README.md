@@ -549,6 +549,64 @@ hud.hide(); hud.show();          // toggle everything
 
 **Gamepad** — see Input above. Pads are polled in the frame loop (`input.gamepads` lists them); bindings unify keyboard, mouse, and pad buttons/axes under action names.
 
+## Persistence & streaming (v0.8.0)
+
+**Save / load** — the whole world as versioned plain JSON (`world.save()` → `world.load()`). Captures entities (transform, tags, custom props, inventory, health), ground/terrain/water config, custom surface kinds and fluid types, fluid volumes, day/night state, quest states, and pickups. Older saves auto-upgrade with a warning; corrupt data throws coded errors (`VWORLD/BAD_SAVE`, `VWORLD/SAVE_TOO_NEW`, `VWORLD/SAVE_CORRUPT`).
+
+```js
+const data = world.save();
+localStorage.setItem('slot1', JSON.stringify(data));
+
+// later, or on another machine:
+world.load(JSON.parse(localStorage.getItem('slot1')));
+world.load(data, { clear: false });            // additive restore
+world.load(data, { height: (x, z) => hills }); // terrain relief — height
+                                               // functions can't be serialized,
+// so pass yours back on load (flat + warning otherwise)
+world.load(data, { onEntity: (rec, entity) => attachVisuals(rec, entity) });
+```
+
+Prefab entities (`world.prefab(...)`) round-trip exactly — name and variant are recorded. Non-prefab entities restore transform/tags/props/inventory/health; rebuild their visuals via `onEntity`, or make them prefabs with `world.registerPrefab()`. Quest rewards are functions and can't be serialized: define quests (with rewards) *before* `world.load()` and only their state restores. Entities tagged `'nosave'` are skipped (ground and pickup visuals rebuild from their config sections).
+
+**Chunk streaming** — load/unload world content by distance to the camera (or any entity/point), with `chunk:load` / `chunk:unload` events:
+
+```js
+const stream = world.chunks({
+  size: 64, radius: 2,                       // 5x5 chunks around the center
+  ...world.chunkProvider('props'),           // deterministic prop scatter
+  // ...or fully custom:
+  // load: (chunk) => spawnStuff(chunk),     // chunk = { cx, cz, key, minX, maxX, minZ, maxZ, center }
+  // unload: (chunk, handle) => despawn(handle),
+  // center: player,                         // 'camera' | Entity | [x, z] | () => ...
+});
+stream.on('chunk:load', (chunk) => console.log('in', chunk.key));
+stream.recheck();   // force a pass now
+stream.dispose();   // unload everything, stop ticking
+```
+
+The default `'props'` provider scatters prefabs per chunk with a seed derived from the chunk key — the same layout every session, no pop-in variance — and disposes them on unload. Chunk math helpers (`chunkIndex`, `chunkKey`, `chunksAround`, `diffChunkSets`, `mulberry32`, …) are exported pure and unit-tested.
+
+**Prefab library** — 17 built-ins across vegetation, rocks, building parts, and furniture, each with variants:
+
+```js
+world.prefab('pineTree');                        // Entity at the origin
+world.prefab('rock', 2);                         // variant as a number
+world.prefab('lantern', { variant: 0, at: [4, 0, -2], rotateY: 0.5 });
+world.prefab({ name: 'crate', at: [0, 0, 5], props: { loot: 'gold' } });
+world.prefabNames();                             // ['barrel', 'bed', 'boulder', ...]
+world.registerPrefab('statue', { category: 'decor', variants: 2,
+  build: (world, entity, variant) => { /* your meshes */ } });
+```
+
+| category | prefabs (variants) |
+|---|---|
+| vegetation | pineTree (3), oakTree (2), bush (2), grassTuft (2) |
+| rock | rock (3), boulder (1) |
+| building | wall (2), door (2), floor (1), pillar (2), fence (2) |
+| furniture | table (1), chair (2), bed (1), crate (2), barrel (1), lantern (2) |
+
+Prefabs are built from engine primitives + the v0.5.0 material presets, so they respect `app.material()` overrides and shadow settings. `entity.saveProps({ ... })` attaches custom data that `world.save()` captures.
+
 ## Build helpers (game-layer primitives)
 
 ```js

@@ -38,6 +38,9 @@ const BUILTIN_KINDS = {
   mud:   { color: 0x5a4632, roughness: 1.0 },
 };
 
+/** Names of the built-in surface kinds (used by persistence to save customs only). */
+export const BUILTIN_SURFACE_KIND_NAMES = Object.keys(BUILTIN_KINDS);
+
 // ---------------------------------------------------------------------------
 // Pure math — no DOM, no THREE scene graph. Importable in node for tests.
 // ---------------------------------------------------------------------------
