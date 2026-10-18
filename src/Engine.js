@@ -7,6 +7,8 @@ import { Assets } from './Assets.js';
 import { Net } from './Net.js';
 import { Build } from './Build.js';
 import { Entity } from './Entity.js';
+import { AI } from './AI.js';
+import { Time } from './Time.js';
 
 /**
  * VWorld Engine — core application object.
@@ -61,6 +63,10 @@ export class Engine {
     this._fixedUpdaters = [];
     this._frameUpdaters = [];
 
+    // --- plugin + event plumbing (must exist before subsystems) ------------
+    this._plugins = new Map();
+    this._events = new Map();
+
     // --- subsystems (sync shells; physics finishes async) ----------------
     this.world = new World(this);
     this.physics = new Physics(this); // RAPIER injected on ready
@@ -68,6 +74,8 @@ export class Engine {
     this.assets = new Assets(this);
     this.net = new Net(this);
     this.build = new Build(this);
+    this.ai = new AI(this);
+    this.time = new Time(this);
 
     this.ready = this._boot();
     this._onResize = () => this.resize();
@@ -119,8 +127,73 @@ export class Engine {
     this.input.update(dt);
     for (const fn of this._frameUpdaters) fn(dt);
     this.world.update(dt);
-    this.renderer.render(this.scene, this.camera);
+    this._emit('tick', dt);
+    // Post-processing plugin (if installed & enabled) takes over rendering.
+    const post = this.world._postChain;
+    if (post && post.enabled) post.render();
+    else this.renderer.render(this.scene, this.camera);
+    this._emit('render', dt);
     requestAnimationFrame((t) => this._loop(t));
+  }
+
+  // --- plugin system ----------------------------------------------------------
+  /**
+   * Install a plugin: `app.use(AudioPlugin)` or `app.use(AudioPlugin, { ... })`.
+   * A plugin is `{ name: 'audio', install(app, options) }`. Core never imports
+   * plugins — plugins attach themselves here. Installing the same name twice
+   * warns and skips (no double wiring).
+   */
+  use(plugin, options) {
+    if (!plugin || typeof plugin.name !== 'string' || typeof plugin.install !== 'function') {
+      throw new Error('[VWorld] app.use() needs a plugin shaped like { name: "audio", install(app, options) }.');
+    }
+    if (this._plugins.has(plugin.name)) {
+      console.warn(`[VWorld] Plugin "${plugin.name}" is already installed — skipping second install.`);
+      return this;
+    }
+    this._plugins.set(plugin.name, plugin);
+    plugin.install(this, options ?? {});
+    return this;
+  }
+
+  /** Is a plugin installed? `app.using('audio')`. */
+  using(name) {
+    return this._plugins.has(name);
+  }
+
+  // --- lifecycle events ---------------------------------------------------------
+  static EVENTS = ['tick', 'render', 'dispose'];
+
+  /**
+   * Subscribe to engine lifecycle: 'tick' (every frame, before render),
+   * 'render' (every frame, after render), 'dispose' (on app.dispose()).
+   */
+  on(event, fn) {
+    if (!Engine.EVENTS.includes(event)) {
+      throw new Error(`[VWorld] app.on() — unknown event "${event}". Try: ${Engine.EVENTS.join(', ')}.`);
+    }
+    if (typeof fn !== 'function') throw new Error('[VWorld] app.on(event, fn) — fn must be a function.');
+    if (!this._events.has(event)) this._events.set(event, new Set());
+    this._events.get(event).add(fn);
+    return this;
+  }
+
+  off(event, fn) {
+    this._events.get(event)?.delete(fn);
+    return this;
+  }
+
+  _emit(event, ...args) {
+    for (const fn of this._events.get(event) ?? []) {
+      try { fn(...args); } catch (err) { console.error(`[VWorld] "${event}" handler threw:`, err); }
+    }
+  }
+
+  /** Stop the loop and tear plugins down. Fires 'dispose'. */
+  dispose() {
+    this._emit('dispose');
+    this.stop();
+    return this;
   }
 
   // --- hooks ---------------------------------------------------------------

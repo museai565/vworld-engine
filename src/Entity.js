@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { toVec3, toNumber, withDefaults } from './util/normalize.js';
 
 let _nextId = 1;
 
@@ -22,6 +23,31 @@ export class Entity {
     this.object = new THREE.Group();
     this.object.userData.entity = this;
     this._ticker = null;
+    this._tags = new Set();
+    this._body = null;            // set by Body.bind()
+    this._collideListeners = [];  // { filter, fn }
+    this._moveTicker = null;
+    this._animator = null;
+  }
+
+  // --- tags --------------------------------------------------------------------
+  /** Tag this entity: `entity.tag('player')`. Chainable. */
+  tag(name) {
+    this._tags.add(String(name));
+    return this;
+  }
+
+  untag(name) {
+    this._tags.delete(String(name));
+    return this;
+  }
+
+  hasTag(name) {
+    return this._tags.has(String(name));
+  }
+
+  get tags() {
+    return [...this._tags];
   }
 
   // --- shape builders ------------------------------------------------------
@@ -58,17 +84,57 @@ export class Entity {
     return this;
   }
 
-  // --- fluent transforms -----------------------------------------------------
-  at(x, y, z) {
-    this.object.position.set(x, y, z);
+  // --- fluent transforms (polymorphic: (x,y,z) | [x,y,z] | {x,y,z} | Vector3 | Entity)
+  at(...args) {
+    const v = toVec3(...args);
+    this.object.position.copy(v);
     return this;
   }
 
-  moveBy(x, y, z) {
-    this.object.position.x += x;
-    this.object.position.y += y;
-    this.object.position.z += z;
+  moveBy(...args) {
+    const v = toVec3(...args);
+    this.object.position.add(v);
     return this;
+  }
+
+  /**
+   * Glide toward a destination over time (visual movement, not physics).
+   * `dest` accepts any toVec3 shape. Arrival fires onArrive once.
+   */
+  moveTo(dest, { speed = 3, arrive = 0.15, onArrive } = {}) {
+    const target = toVec3(dest);
+    const sp = toNumber(speed, 'speed');
+    this._stopMove();
+    const obj = this.object;
+    const tick = (dt) => {
+      const d = target.clone().sub(obj.position);
+      d.y = 0;
+      const dist = d.length();
+      if (dist <= arrive) {
+        obj.position.copy(target);
+        this._stopMove();
+        if (typeof onArrive === 'function') {
+          try { onArrive(this); } catch (err) { console.error('[VWorld] moveTo onArrive threw:', err); }
+        }
+        return;
+      }
+      d.normalize().multiplyScalar(Math.min(sp * dt, dist));
+      obj.position.add(d);
+    };
+    this._moveTicker = tick;
+    if (this.engine) this.engine.onUpdate(tick);
+    return this;
+  }
+
+  /** Cancel an in-flight moveTo. */
+  stopMove() {
+    this._stopMove();
+    return this;
+  }
+
+  _stopMove() {
+    if (this._moveTicker && this.engine) this.engine.offUpdate(this._moveTicker);
+    this._moveTicker = null;
   }
 
   rotateX(a) { this.object.rotation.x += a; return this; }
@@ -90,18 +156,82 @@ export class Entity {
     return this;
   }
 
-  lookAt(x, y, z) {
-    this.object.lookAt(x, y, z);
+  lookAt(...args) {
+    const v = toVec3(...args);
+    this.object.lookAt(v);
     return this;
   }
 
   show() { this.object.visible = true; return this; }
   hide() { this.object.visible = false; return this; }
 
-  /** Parent another entity under this one. */
-  child(entity) {
-    this.object.add(entity.object);
+  /** Parent one entity — or an array of them — under this one. */
+  attach(...children) {
+    const flat = children.length === 1 && Array.isArray(children[0]) ? children[0] : children;
+    for (const c of flat) {
+      if (!c || !c.object) throw new Error('[VWorld] attach() needs Entities — got ' + (c === null ? 'null' : typeof c) + '.');
+      this.object.add(c.object);
+    }
     return this;
+  }
+
+  /** Alias kept for v0.1.0 compatibility. */
+  child(entity) {
+    return this.attach(entity);
+  }
+
+  // --- collision + sensor events ---------------------------------------------------
+  /**
+   * Listen for physics contacts involving this entity's body:
+   *   entity.on('collide', (other, started) => ...)
+   *   entity.on('collide:player', (other, started) => ...) // filtered by tag
+   *   entity.on('enter', (other) => ...)  // sensor volumes only
+   *   entity.on('exit', (other) => ...)
+   * Requires a physics body bound via app.physics.body()...bind(entity).build().
+   */
+  on(event, fn) {
+    if (typeof fn !== 'function') throw new Error('[VWorld] entity.on(event, fn) — fn must be a function.');
+    const [kind, filter] = String(event).split(':');
+    if (!['collide', 'enter', 'exit'].includes(kind)) {
+      throw new Error(`[VWorld] entity.on() — unknown event "${event}". Try 'collide', 'collide:<tag>', 'enter', 'exit'.`);
+    }
+    if (!this._body) {
+      console.warn('[VWorld] entity.on(\'' + event + '\') has no physics body yet — bind one with app.physics.body()...bind(entity).build() and the listener will arm automatically.');
+    }
+    this._collideListeners.push({ kind, filter: filter || null, fn });
+    if (this._body && this.engine) this.engine.physics._watchBody(this._body);
+    return this;
+  }
+
+  /** Remove a previously added listener. */
+  off(event, fn) {
+    const [kind, filter] = String(event).split(':');
+    this._collideListeners = this._collideListeners.filter(
+      (l) => !(l.kind === kind && (filter || null) === l.filter && l.fn === fn)
+    );
+    return this;
+  }
+
+  /** Dispatch a contact event to matching listeners (called by Physics). */
+  _dispatch(kind, otherEntity, started) {
+    for (const l of this._collideListeners) {
+      if (l.kind !== kind) continue;
+      if (l.filter && !(otherEntity && otherEntity.hasTag(l.filter))) continue;
+      try {
+        if (kind === 'collide') l.fn(otherEntity, started);
+        else l.fn(otherEntity);
+      } catch (err) { console.error('[VWorld] entity event listener threw:', err); }
+    }
+  }
+
+  // --- animation (needs the animation plugin) ---------------------------------------
+  /** Animator for this entity — requires app.use(AnimationPlugin) first. */
+  anim() {
+    if (!this.engine || !this.engine.using('animation')) {
+      throw new Error('[VWorld] entity.anim() needs the animation plugin — app.use(AnimationPlugin) first.');
+    }
+    if (!this._animator) this._animator = this.engine.animation.for(this);
+    return this._animator;
   }
 
   /** Run `fn(dt, entity)` every rendered frame. Removed on destroy(). */
@@ -116,6 +246,7 @@ export class Entity {
 
   /** Remove from scene, dispose geometry/materials, unhook tickers. */
   destroy() {
+    this._stopMove();
     if (this._ticker && this.engine) this.engine.offUpdate(this._ticker);
     this.object.traverse((o) => {
       if (o.isMesh) {

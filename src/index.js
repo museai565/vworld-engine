@@ -18,5 +18,9 @@ export { PlayerController } from './PlayerController.js';
 export { Assets } from './Assets.js';
 export { Net } from './Net.js';
 export { Build } from './Build.js';
+export { AI, StateMachine } from './AI.js';
+export { Time, EASES, easeValue } from './Time.js';
+export { AudioPlugin, EffectsPlugin, PostPlugin, AnimationPlugin, allPlugins } from './plugins/index.js';
+export { toVec3, toXYZ, toNumber, withDefaults, toAxis, axisToVec3 } from './util/normalize.js';
 
-export const VERSION = '0.1.0';
+export const VERSION = '0.2.0';
