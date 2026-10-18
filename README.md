@@ -464,15 +464,45 @@ const hit = app.build.pickScene(mouseX, mouseY);               // raycast pick
 if (hit) ghost.position.copy(app.build.snapVec3(hit.point));
 ```
 
-## Net (game-layer stub)
+## Netcode (v0.6.0)
 
-No transport ships in the engine — but the seams are real:
+No transport ships in the engine — the game layer owns its socket — but everything around it is real now: prediction, interpolation, lag compensation, interest management, and bandwidth savers. All math is pure and exported for tests.
 
 ```js
-net.on('entity:update', (snap) => { /* apply */ });
-const snap = net.serialize(entity);   // { id, p, q, s } wire format
-net.applySnapshot(entity, snap);
+// --- client-side prediction: move instantly, reconcile on server truth ---
+const seq = net.predict(player, { move: [0, -1], sprint: true }, { dt: 1 / 60 });
+socket.send({ type: 'input', seq, input });          // server acks with last seq
+// on authoritative snapshot:
+net.correct(player, serverSnap, ackSeq);            // snap + re-apply unacked inputs
+
+// --- interpolation: smooth remote entities, 100ms behind newest snapshot ---
+const interp = net.interpolate({ delay: 100 });
+socket.on('snapshot', (s) => interp.push(s));
+interp.apply(remoteEntitiesById);                   // per frame
+
+// --- lag compensation (server): rewind for fair hit tests ---
+const rw = net.rewind({ historyMs: 1000 });
+rw.push(now, { [id]: entity.object.position });      // per tick
+const past = rw.at(shotTime - ping / 2);            // test the hit here
+
+// --- interest: only replicate what's relevant ---
+const im = net.interest({ radius: 60, kinds: ['player', 'prop'] });
+const visible = im.relevant(playerEntity, allEntities);
+
+// --- bandwidth: deltas, quantization, prioritization ---
+const d = net.delta(prevSnaps, nextSnaps);          // 'same' | 'full' | { p:[dx,dy,dz] }
+const wire = net.quantize(snap);                    // fixed-point pos, smallest-three quat
+const rates = net.prioritize(viewer, entities);     // [{ id, dist, hz, interval }]
 ```
+
+Notes:
+
+- `net.predict` input accepts `'forward'`/`'back'`/`'left'`/`'right'`, `[x, z]`, `{ x, z }`, or `{ move, jump, sprint }` — always world-space (convert camera-relative input first). The arcade mover (`speed/accel/friction/gravity/jumpSpeed`) is tunable per call.
+- `net.correct` emits `net:corrected` with `{ entity, ackSeq, reapplied }` so you can hide the pop.
+- Interpolation lerps positions and slerps quaternions between the two snapshots bracketing render time; times outside the buffer hold the nearest end.
+- Quantization defaults: 16-bit positions over ±512 m (< 2 cm error), 10-bit smallest-three quaternions.
+- The old hooks still work unchanged: `net.on('entity:update', …)`, `net.serialize(entity)`, `net.applySnapshot(entity, snap)`.
+- Honest boundary: game netcode, not a networking paper — no encryption, no cheat-proofing, no clock sync. Pair with your transport's acks and RTT.
 
 ## Production hardening (v0.4.0)
 

@@ -16,7 +16,14 @@ export { Physics, Body } from './Physics.js';
 export { Input } from './Input.js';
 export { PlayerController } from './PlayerController.js';
 export { Assets } from './Assets.js';
-export { Net } from './Net.js';
+export {
+  Net, Interpolator, RewindBuffer, InterestManager,
+  normalizeNetInput, applyNetInput, reconcileNetState, quatSlerp,
+  normalizeSnapshot, sampleSnapshots, rewindEntities,
+  quantizeSnap, dequantizeSnap, deltaSnap, applyDeltaSnap,
+  prioritizeUpdates, isRelevant,
+  PREDICT_DEFAULTS, QUANTIZE_DEFAULTS, PRIORITIZE_DEFAULTS,
+} from './Net.js';
 export { Build } from './Build.js';
 export { AI, StateMachine } from './AI.js';
 export { Time, EASES, easeValue } from './Time.js';
@@ -38,4 +45,4 @@ export { Profiler } from './Profiler.js';
 export { VWorldError, vError, createErrorBus, reportError } from './util/errors.js';
 export { QUALITY_LEVELS, resolveQuality, normalizeQuality, autoStep } from './util/quality.js';
 
-export const VERSION = '0.5.0';
+export const VERSION = '0.6.0';

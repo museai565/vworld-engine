@@ -347,7 +347,13 @@ export class CharacterRegistry {
   spawn(id: string, options?: { tint?: number }): Promise<THREE.Group>;
 }
 
-/** Net — multiplayer seams (no transport ships in the engine). */
+/** Net — client prediction, interpolation, lag compensation, interest, bandwidth. No transport ships in the engine. */
+export interface NetInput { move?: [number, number] | { x: number; z: number } | string; jump?: boolean; sprint?: boolean }
+export interface NetState { p: [number, number, number]; v: [number, number, number]; grounded: boolean }
+export interface NetSnapshot { id: string; p: [number, number, number]; q: [number, number, number, number]; s?: [number, number, number] }
+export interface NetPendingInput { seq: number; input: { move: { x: number; z: number }; jump: boolean; sprint: boolean } }
+export interface InterestRuleObject { radius?: number; kinds?: string[]; exclude?: string[] }
+export type InterestRule = number | ((entity: unknown, viewer: unknown) => boolean) | InterestRuleObject;
 export class Net {
   on(event: string, fn: (data: unknown) => void): this;
   off(event: string, fn: (data: unknown) => void): this;
@@ -356,10 +362,61 @@ export class Net {
   applySnapshot(entity: Entity, snap: { p?: number[]; q?: number[]; s?: number[] }): this;
   snapshotAll(): unknown[];
   sendRate(hz: number): this;
+  predict(entity: Entity, input: NetInput | string | [number, number] | { x: number; z: number }, opts?: { dt?: number; speed?: number; accel?: number; friction?: number; gravity?: number; jumpSpeed?: number; minY?: number; sprintMul?: number }): number;
+  ack(entity: Entity, ackSeq: number): this;
+  predictionPending(entity: Entity): number;
+  correct(entity: Entity, authSnap: { p: [number, number, number]; v?: [number, number, number]; grounded?: boolean }, ackSeq: number, opts?: { dt?: number }): this;
+  forgetPrediction(entity: Entity): this;
+  interpolate(opts?: { delay?: number; maxBuffer?: number }): Interpolator;
+  rewind(opts?: { historyMs?: number; maxSamples?: number }): RewindBuffer;
+  interest(rule?: InterestRule): InterestManager;
+  relevant(viewer: unknown, entities: unknown[], rule?: InterestRule): unknown[];
+  delta(prev: Record<string, NetSnapshot>, next: Record<string, NetSnapshot>, eps?: number): Record<string, unknown>;
+  applyDelta(prev: Record<string, NetSnapshot>, d: Record<string, unknown>): Record<string, NetSnapshot>;
+  quantize(snap: NetSnapshot, opts?: { posBits?: number; posRange?: number; quatBits?: number }): unknown;
+  dequantize(qs: unknown, opts?: { posBits?: number; posRange?: number; quatBits?: number }): NetSnapshot;
+  prioritize(viewer: unknown, entities: Array<{ id: string; p: [number, number, number] }>, opts?: { near?: number; mid?: number; nearHz?: number; midHz?: number; farHz?: number }): Array<{ id: string; dist: number; hz: number; interval: number }>;
   connect(url: string): void;
   send(event: string, data: unknown): void;
   disconnect(): void;
 }
+export class Interpolator {
+  constructor(opts?: { delay?: number; maxBuffer?: number });
+  push(snap: unknown): this;
+  renderTime(now?: number): number;
+  sample(now?: number): Record<string, { p: [number, number, number]; q: [number, number, number, number] }>;
+  apply(byId: Record<string, Entity>, now?: number): this;
+  clear(): this;
+}
+export class RewindBuffer {
+  constructor(opts?: { historyMs?: number; maxSamples?: number });
+  push(t: number, positions: Record<string, { p: [number, number, number] } | [number, number, number]>): this;
+  at(timestamp: number): Record<string, { p: [number, number, number] }>;
+  clear(): this;
+}
+export class InterestManager {
+  constructor(rule?: InterestRule);
+  rule(r: InterestRule): this;
+  relevant(viewer: unknown, entities: unknown[]): unknown[];
+  relevantIds(viewer: unknown, entities: unknown[]): string[];
+  for(viewer: unknown): (e: unknown) => boolean;
+}
+export declare function normalizeNetInput(input: unknown): { move: { x: number; z: number }; jump: boolean; sprint: boolean };
+export declare function applyNetInput(state: NetState, input: unknown, dt: number, opts?: Record<string, number>): NetState;
+export declare function reconcileNetState(authoritative: { p: [number, number, number]; v?: [number, number, number]; grounded?: boolean }, pendingInputs: NetPendingInput[], dt: number, opts?: Record<string, number>): { state: NetState; applied: number[] };
+export declare function quatSlerp(q0: [number, number, number, number], q1: [number, number, number, number], t: number): [number, number, number, number];
+export declare function normalizeSnapshot(snap: unknown): { t: number; ents: Record<string, { p: [number, number, number]; q?: [number, number, number, number] }> };
+export declare function sampleSnapshots(buffer: unknown[], renderTime: number): Record<string, { p: [number, number, number]; q: [number, number, number, number] }>;
+export declare function rewindEntities(history: unknown[], timestamp: number): Record<string, { p: [number, number, number] }>;
+export declare function quantizeSnap(snap: NetSnapshot, opts?: Record<string, number>): unknown;
+export declare function dequantizeSnap(qs: unknown, opts?: Record<string, number>): NetSnapshot;
+export declare function deltaSnap(prev: Record<string, NetSnapshot>, next: Record<string, NetSnapshot>, eps?: number): Record<string, unknown>;
+export declare function applyDeltaSnap(prev: Record<string, NetSnapshot>, delta: Record<string, unknown>): Record<string, NetSnapshot>;
+export declare function prioritizeUpdates(entities: Array<{ id: string; p: [number, number, number] }>, viewer: unknown, opts?: Record<string, number>): Array<{ id: string; dist: number; hz: number; interval: number }>;
+export declare function isRelevant(entity: unknown, viewer: unknown, rule?: InterestRule): boolean;
+export declare const PREDICT_DEFAULTS: Record<string, number>;
+export declare const QUANTIZE_DEFAULTS: Record<string, number>;
+export declare const PRIORITIZE_DEFAULTS: Record<string, number>;
 
 /** Result of Build.pick() / pickScene(): raycast hit with world-space normal. */
 export interface PickResult {

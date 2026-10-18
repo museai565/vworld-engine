@@ -13,6 +13,13 @@ import {
 } from '../src/Rendering.js';
 import { evaluateRuleWeight, compositeWeights, valueNoise } from '../src/Surfaces.js';
 import { submergedFraction, buoyancyNetAccel } from '../src/Fluids.js';
+import {
+  Interpolator, RewindBuffer, InterestManager,
+  normalizeNetInput, applyNetInput, reconcileNetState, quatSlerp,
+  sampleSnapshots, rewindEntities,
+  quantizeSnap, dequantizeSnap, deltaSnap, applyDeltaSnap,
+  prioritizeUpdates, isRelevant,
+} from '../src/Net.js';
 import { VWorldError, vError, createErrorBus, reportError } from '../src/util/errors.js';
 import { Profiler } from '../src/Profiler.js';
 import { QUALITY_LEVELS, resolveQuality, normalizeQuality, autoStep } from '../src/util/quality.js';
@@ -442,6 +449,113 @@ console.log('== Entity.lod (node-safe, fake engine) ==');
   ok('lod() chainable', e.lod([{ distance: 0, mesh: hi }]) === e);
   e.dispose();
   ok('dispose clears lod', e._lod === null && e.lodIndex === -1);
+}
+
+console.log('\n== netcode v0.6.0 ==');
+{
+  // --- normalizeNetInput ---
+  const fwd = normalizeNetInput('forward');
+  ok('word forward', fwd.move.x === 0 && fwd.move.z === -1 && !fwd.jump);
+  const arr = normalizeNetInput([1, 0]);
+  ok('array move', arr.move.x === 1 && arr.move.z === 0);
+  const sh = normalizeNetInput({ x: 2, z: 3 });
+  ok('object shorthand', sh.move.x === 2 && sh.move.z === 3);
+  const full = normalizeNetInput({ move: [0, 1], jump: true, sprint: true });
+  ok('full object', full.move.z === 1 && full.jump && full.sprint);
+  const idle = normalizeNetInput(null);
+  ok('null = idle', idle.move.x === 0 && idle.move.z === 0 && !idle.jump && !idle.sprint);
+  let threw = false;
+  try { normalizeNetInput('sideways'); } catch (e) { threw = /move word/.test(e.message); }
+  ok('bad word throws helpful', threw);
+
+  // --- applyNetInput ---
+  const mover = { speed: 5, accel: 10000, friction: 0, gravity: 0, minY: -1000 };
+  const s1 = applyNetInput({ p: [0, 0, 0], v: [0, 0, 0], grounded: true }, { move: [1, 0] }, 1, mover);
+  ok('moves +x at speed', approx(s1.p[0], 5) && approx(s1.v[0], 5));
+  const fall = applyNetInput({ p: [0, 10, 0], v: [0, 0, 0], grounded: false }, null, 1, { gravity: 10, minY: 0 });
+  ok('gravity lands on minY', fall.p[1] === 0 && fall.v[1] === 0 && fall.grounded === true);
+  const jump = applyNetInput({ p: [0, 0, 0], v: [0, 0, 0], grounded: true }, { jump: true }, 0.1, { jumpSpeed: 8, gravity: 22 });
+  ok('jump leaves ground', jump.v[1] > 0 && jump.p[1] > 0 && jump.grounded === false);
+  const noAirJump = applyNetInput({ p: [0, 5, 0], v: [0, 0, 0], grounded: false }, { jump: true }, 0.1, { jumpSpeed: 8, gravity: 22 });
+  ok('no double jump', noAirJump.v[1] < 0);
+
+  // --- reconcileNetState ---
+  const rec = reconcileNetState({ p: [0, 0, 0] }, [
+    { seq: 1, input: { move: [1, 0] } },
+    { seq: 2, input: { move: [1, 0] } },
+  ], 1, mover);
+  ok('reconcile re-applies inputs', approx(rec.state.p[0], 10) && rec.applied.join(',') === '1,2');
+
+  // --- quatSlerp / sampleSnapshots ---
+  const qs = quatSlerp([0, 0, 0, 1], [0, 1, 0, 0], 0.5);
+  ok('slerp midpoint', approx(qs[1], Math.SQRT1_2, 1e-4) && approx(qs[3], Math.SQRT1_2, 1e-4));
+  const buf = [
+    { t: 0, ents: { a: { p: [0, 0, 0], q: [0, 0, 0, 1] } } },
+    { t: 100, ents: { a: { p: [10, 0, 0], q: [0, 0, 0, 1] } } },
+  ];
+  const mid = sampleSnapshots(buf, 50);
+  ok('interpolate midpoint', approx(mid.a.p[0], 5) && approx(mid.a.q[3], 1));
+  ok('before-first holds', sampleSnapshots(buf, -10).a.p[0] === 0);
+  ok('after-last holds', sampleSnapshots(buf, 500).a.p[0] === 10);
+  ok('empty buffer = {}', Object.keys(sampleSnapshots([], 50)).length === 0);
+
+  // --- rewindEntities ---
+  const hist = [
+    { t: 0, ents: { a: [0, 0, 0] } },
+    { t: 100, ents: { a: { p: [10, 0, 0] } } },
+  ];
+  ok('rewind midpoint', approx(rewindEntities(hist, 50).a.p[0], 5));
+  ok('rewind exact', rewindEntities(hist, 0).a.p[0] === 0);
+
+  // --- quantize round-trip ---
+  const snap = { id: 'a', p: [1.234, -5.678, 100.5], q: [0, 0, 0, 1], s: [1, 1, 1] };
+  const dq = dequantizeSnap(quantizeSnap(snap));
+  const perr = Math.max(Math.abs(dq.p[0] - 1.234), Math.abs(dq.p[1] + 5.678), Math.abs(dq.p[2] - 100.5));
+  ok('quantize pos error < 2cm', perr < 0.02, `err=${perr}`);
+  ok('quantize identity quat', Math.abs(dq.q[0]) < 1e-6 && Math.abs(dq.q[3] - 1) < 1e-3);
+  const qr = { id: 'b', p: [0, 0, 0], q: [0, 0.7071, 0, 0.7071] };
+  const dqr = dequantizeSnap(quantizeSnap(qr));
+  const dot = Math.abs(dqr.q[1] * 0.7071 + dqr.q[3] * 0.7071);
+  ok('quantize rotated quat', dot > 0.999, `dot=${dot}`);
+
+  // --- deltaSnap / applyDeltaSnap ---
+  const prev = { a: { id: 'a', p: [0, 0, 0], q: [0, 0, 0, 1] } };
+  const sameNext = { a: { id: 'a', p: [0, 0, 0], q: [0, 0, 0, 1] } };
+  ok('unchanged = same', deltaSnap(prev, sameNext).a === 'same');
+  const movedNext = { a: { id: 'a', p: [1, 0, 0], q: [0, 0, 0, 1] } };
+  const d = deltaSnap(prev, movedNext);
+  ok('moved = pos delta', Array.isArray(d.a.p) && approx(d.a.p[0], 1) && d.a.q === undefined);
+  const rebuilt = applyDeltaSnap(prev, d);
+  ok('applyDelta reconstructs', approx(rebuilt.a.p[0], 1) && rebuilt.a.q[3] === 1);
+  const withNew = { a: prev.a, b: { id: 'b', p: [2, 2, 2], q: [0, 0, 0, 1] } };
+  ok('new entity = full', deltaSnap(prev, withNew).b.full.p[0] === 2);
+
+  // --- prioritizeUpdates ---
+  const pri = prioritizeUpdates(
+    [{ id: 'far', p: [200, 0, 0] }, { id: 'near', p: [5, 0, 0] }, { id: 'mid', p: [50, 0, 0] }],
+    { p: [0, 0, 0] }
+  );
+  ok('nearest first', pri.map((e) => e.id).join(',') === 'near,mid,far');
+  ok('hz tiers', pri[0].hz === 20 && pri[1].hz === 10 && pri[2].hz === 2);
+  ok('interval = 1000/hz', pri[0].interval === 50);
+
+  // --- isRelevant ---
+  ok('inside radius', isRelevant({ id: 'a', p: [5, 0, 0] }, { p: [0, 0, 0] }, 10) === true);
+  ok('outside radius', isRelevant({ id: 'a', p: [50, 0, 0] }, { p: [0, 0, 0] }, 10) === false);
+  ok('function rule', isRelevant({ id: 'a' }, {}, () => true) === true);
+  ok('exclude wins', isRelevant({ id: 'a', p: [1, 0, 0] }, { p: [0, 0, 0] }, { radius: 10, exclude: ['a'] }) === false);
+  ok('kinds filter', isRelevant({ id: 'a', kind: 'prop', p: [1, 0, 0] }, { p: [0, 0, 0] }, { radius: 100, kinds: ['player'] }) === false);
+
+  // --- fluent classes ---
+  const ip = new Interpolator({ delay: 100 });
+  ip.push({ t: 0, ents: { a: { p: [0, 0, 0] } } });
+  ip.push({ t: 200, ents: { a: { p: [20, 0, 0] } } });
+  ok('Interpolator respects delay', approx(ip.sample(200).a.p[0], 10));
+  const rb = new RewindBuffer();
+  rb.push(0, { a: [0, 0, 0] }).push(100, { a: [10, 0, 0] });
+  ok('RewindBuffer.at', approx(rb.at(50).a.p[0], 5));
+  const im = new InterestManager(10);
+  ok('InterestManager filters', im.relevantIds({ p: [0, 0, 0] }, [{ id: 'a', p: [5, 0, 0] }, { id: 'b', p: [50, 0, 0] }]).join(',') === 'a');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
