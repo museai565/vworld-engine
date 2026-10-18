@@ -157,6 +157,21 @@ export class Engine {
   clouds(options?: CloudOptions): CloudLayer;
   /** Fake volumetric light shaft (additive cone). Added to the scene automatically. */
   lightShaft(options?: LightShaftOptions): LightShaft;
+  /**
+   * The world's quest log (created lazily): define quests, advance
+   * objectives, run completion rewards.
+   */
+  quests(): QuestLog;
+  /**
+   * Walk a branching dialogue tree (NPC conversations).
+   * Returns a fresh Dialogue each call.
+   */
+  dialogue(tree: DialogueTree): Dialogue;
+  /**
+   * Screen-space HUD overlay: health bars, prompts, crosshair, objective
+   * tracker. Created lazily; no-ops cleanly without a DOM.
+   */
+  hud(): Hud;
   /** Re-sync renderer size to the canvas. */
   resize(): this;
 }
@@ -230,6 +245,17 @@ export class Entity {
   serialize(): { id: string; p: [number, number, number]; q: [number, number, number, number]; s: [number, number, number] };
   /** Apply a snapshot produced by serialize(). */
   applySnapshot(snap: { p?: number[]; q?: number[]; s?: number[] }): this;
+
+  /**
+   * This entity's inventory (created lazily on first call).
+   * Options ({ capacity, maxSlots }) only apply on first call.
+   */
+  inventory(options?: { capacity?: number; maxSlots?: number }): Inventory;
+  /**
+   * This entity's health pool (created lazily on first call).
+   * Accepts a max number or { max, hp }.
+   */
+  health(max?: number | { max?: number; hp?: number }): Health;
 }
 
 /** Physics — Rapier (WASM) wrapped in a fluent API. */
@@ -309,6 +335,30 @@ export class Input {
   lockPointer(): void;
   unlockPointer(): void;
   enabled: boolean;
+
+  /**
+   * Bind action names to inputs: map({ jump: ['Space', 'gamepad:0'] })
+   * or map('jump', ['Space']). Re-calling replaces an action's bindings.
+   */
+  map(def: Record<string, string | ParsedBinding | Array<string | ParsedBinding> | undefined> | string, bindings?: string | ParsedBinding | Array<string | ParsedBinding>): this;
+  /** Remove an action's bindings. */
+  unmap(action: string): this;
+  /** Action names currently bound. */
+  actions(): string[];
+  /** Raw parsed bindings for an action (debugging). */
+  bindingsFor(action: string): ParsedBinding[];
+  /** Is any binding of this action held? */
+  action(name: string): boolean;
+  /** Was any binding of this action pressed this frame? */
+  actionPressed(name: string): boolean;
+  /** Was any binding of this action released this frame? */
+  actionReleased(name: string): boolean;
+  /** -1..1 from two actions, e.g. actionAxis('moveLeft', 'moveRight'). */
+  actionAxis(negative: string, positive: string): number;
+  /** Is mouse button held? 0=left, 1=middle, 2=right. */
+  mouseButton(button: number): boolean;
+  /** Snapshot of connected gamepads (empty without navigator). */
+  readonly gamepads: Array<{ index: number; buttons: number; axes: number }>;
 }
 
 /** PlayerController — kinematic character with camera follow. */
@@ -462,6 +512,13 @@ export class World {
   scatter(kind: string, options?: Record<string, unknown>): unknown;
   biome(name: string, options?: { area?: unknown; color?: number | null }): unknown;
   update(dt: number): void;
+  /**
+   * Auto-collect pickup zone granting inventory items and/or health,
+   * with respawn timer. See PickupOptions.
+   */
+  pickup(options?: PickupOptions): Pickup;
+  /** All live pickups. */
+  readonly pickups: Pickup[];
 }
 
 export class DayNightCycle {
@@ -848,6 +905,204 @@ export declare class InstancedSet {
   moveBy(...args: Vec3Input[]): this;
   shadows(on?: boolean): this;
   addTo(appOrScene: Engine | THREE.Scene): this;
+  dispose(): this;
+}
+
+/** Gameplay systems (v0.7.0). */
+
+export type ItemInput = string | { id?: string; item?: string; name?: string; qty?: number; count?: number };
+
+export interface InventoryChangeEvent {
+  item: string | null;
+  qty: number;
+  delta: number;
+  total: number;
+  action: 'add' | 'remove' | 'clear';
+}
+
+export class Inventory {
+  constructor(options?: { capacity?: number; maxSlots?: number }, engine?: Engine | null);
+  readonly slots: number;
+  readonly total: number;
+  on(event: 'change', fn: (e: InventoryChangeEvent) => void): this;
+  off(event: 'change', fn: (e: InventoryChangeEvent) => void): this;
+  count(item: ItemInput): number;
+  has(item: ItemInput, qty?: number): boolean;
+  list(): Array<{ item: string; qty: number }>;
+  add(item: ItemInput, qty?: number): number;
+  remove(item: ItemInput, qty?: number): number;
+  clear(): this;
+}
+
+export interface HealthEvent {
+  amount: number;
+  hp: number;
+  max: number;
+  source?: unknown;
+}
+
+export class Health {
+  constructor(max?: number | { max?: number; hp?: number }, engine?: Engine | null);
+  readonly hp: number;
+  readonly max: number;
+  readonly dead: boolean;
+  readonly fraction: number;
+  on(event: 'damage' | 'heal' | 'death', fn: (e: HealthEvent) => void): this;
+  off(event: string, fn: (...args: any[]) => void): this;
+  damage(amount: number, source?: unknown): number;
+  heal(amount: number): number;
+}
+
+export interface QuestObjectiveDef {
+  id?: string;
+  text?: string;
+  target?: number;
+}
+
+export interface QuestDef {
+  id?: string;
+  name?: string;
+  objectives: Array<string | QuestObjectiveDef>;
+  reward?: (quest: QuestSummary) => void;
+}
+
+export interface QuestObjectiveState {
+  id: string;
+  text: string;
+  target: number;
+  count: number;
+  done: boolean;
+}
+
+export interface QuestSummary {
+  id: string;
+  name: string;
+  state: 'locked' | 'active' | 'complete';
+  objectives: QuestObjectiveState[];
+}
+
+export type QuestState = 'unknown' | 'locked' | 'active' | 'complete';
+
+export class QuestLog {
+  constructor(engine?: Engine | null);
+  on(event: 'start' | 'objective' | 'complete', fn: (e: { quest: QuestSummary; objective?: QuestObjectiveState }) => void): this;
+  off(event: string, fn: (...args: any[]) => void): this;
+  define(def: QuestDef): this;
+  state(id: string): QuestState;
+  start(id: string): this;
+  advance(questId: string, objectiveId: string, n?: number): this;
+  objective(questId: string, objectiveId: string): QuestObjectiveState | null;
+  reset(id: string): this;
+  list(): QuestSummary[];
+}
+
+export interface DialogueChoice {
+  id?: string | null;
+  text: string;
+  to?: string | null;
+}
+
+export interface DialogueNodeDef {
+  text?: string;
+  choices?: Array<string | DialogueChoice>;
+  onEnter?: (dialogue: Dialogue) => void;
+}
+
+export interface DialogueTree {
+  start?: string;
+  nodes: Record<string, string | DialogueNodeDef>;
+}
+
+export interface DialogueNode {
+  id: string;
+  text: string;
+  choices: DialogueChoice[];
+}
+
+export class Dialogue {
+  constructor(tree: DialogueTree, engine?: Engine | null);
+  on(event: 'node' | 'choice' | 'end', fn: (e: any) => void): this;
+  off(event: string, fn: (...args: any[]) => void): this;
+  node(): DialogueNode | null;
+  readonly ended: boolean;
+  choose(sel: number | string): DialogueNode | null;
+  reset(): this;
+}
+
+export type ParsedBinding =
+  | { type: 'key'; code: string }
+  | { type: 'mouse'; button: number }
+  | { type: 'padButton'; pad: number; button: number }
+  | { type: 'padAxis'; pad: number; axis: number; dir: -1 | 0 | 1 };
+
+export interface KeyState {
+  keys: Set<string>;
+  pressed: Set<string>;
+  released: Set<string>;
+  mouse: Set<number>;
+  mousePressed: Set<number>;
+  mouseReleased: Set<number>;
+}
+
+export interface PadState {
+  buttons: boolean[];
+  pressed: boolean[];
+  released: boolean[];
+  axes: number[];
+}
+
+export declare function normalizeItemId(item: ItemInput): string;
+export declare function parseBinding(str: string): ParsedBinding;
+export declare function normalizeBindings(input: string | ParsedBinding | Array<string | ParsedBinding>): ParsedBinding[];
+export declare function bindingHeld(b: ParsedBinding, kb: KeyState, pads?: Array<PadState | null>): boolean;
+export declare function bindingPressed(b: ParsedBinding, kb: KeyState, pads?: Array<PadState | null>): boolean;
+export declare function bindingReleased(b: ParsedBinding, kb: KeyState, pads?: Array<PadState | null>): boolean;
+export declare function actionHeld(bindings: ParsedBinding[], kb: KeyState, pads?: Array<PadState | null>): boolean;
+export declare function actionPressed(bindings: ParsedBinding[], kb: KeyState, pads?: Array<PadState | null>): boolean;
+export declare function actionReleased(bindings: ParsedBinding[], kb: KeyState, pads?: Array<PadState | null>): boolean;
+export declare function inPickupRange(
+  center: { x?: number; y?: number; z?: number },
+  radius: number,
+  point: { x?: number; y?: number; z?: number }
+): boolean;
+
+export interface PickupOptions {
+  kind?: string;
+  at?: Vec3Input;
+  radius?: number;
+  item?: ItemInput | null;
+  amount?: number;
+  heal?: number;
+  respawn?: number;
+  onCollect?: (e: { pickup: Pickup; entity: Entity; granted: { item: string | null; amount: number; heal: number } }) => void;
+  mesh?: boolean | THREE.Object3D;
+  spin?: boolean;
+  bob?: boolean;
+}
+
+export class Pickup {
+  constructor(world?: World | null, options?: PickupOptions);
+  readonly kind: string;
+  readonly radius: number;
+  readonly active: boolean;
+  grantsFor(): { item: string | null; amount: number; heal: number };
+  collectBy(entity: Entity): { item: string | null; amount: number; heal: number } | null;
+  tick(dt: number): void;
+  dispose(): this;
+}
+
+export class Hud {
+  constructor(engine?: Engine | null);
+  readonly supported: boolean;
+  bar(name: string, fraction: number, options?: { label?: string; color?: string; width?: number }): this;
+  removeBar(name: string): this;
+  prompt(text: string): this;
+  clearPrompt(): this;
+  crosshair(show?: boolean): this;
+  objective(text: string): this;
+  clearObjective(): this;
+  show(): this;
+  hide(): this;
   dispose(): this;
 }
 

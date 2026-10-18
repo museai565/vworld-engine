@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { toVec3, toNumber, withDefaults } from './util/normalize.js';
 import { SurfaceKinds, buildAtlas, buildSplatMaterial, evaluateRuleWeight, compositeWeights, MAX_SURFACE_LAYERS } from './Surfaces.js';
 import { FluidSystem } from './Fluids.js';
+import { Pickup } from './Gameplay.js';
 
 /**
  * World — environment: sky dome, sun + hemisphere lights, fog, ground.
@@ -79,6 +80,8 @@ export class World {
     // --- v0.3.0: surfaces + fluids --------------------------------------------
     this._surfaces = new SurfaceKinds();
     this._fluidSystem = new FluidSystem(this);
+    // --- v0.7.0: pickups ----------------------------------------------------------
+    this._pickups = [];
   }
 
   /**
@@ -119,6 +122,26 @@ export class World {
   /** All live fluid volumes (used by nearFluid surface rules, and by games). */
   get fluids() {
     return this._fluidSystem.fluids;
+  }
+
+  /**
+   * Auto-collect pickup zone — grants inventory items and/or health to
+   * entities that walk into it, then respawns on a timer (v0.7.0).
+   *
+   *   world.pickup({ kind: 'coin', at: [10, 1, 4], radius: 1.6,
+   *                  item: 'coin', amount: 5, respawn: 12 });
+   *   world.pickup({ kind: 'heart', at: [4, 1, -8], heal: 25, respawn: 20,
+   *                  onCollect: ({ entity }) => console.log('healed', entity.id) });
+   */
+  pickup(options = {}) {
+    const p = new Pickup(this, options);
+    this._pickups.push(p);
+    return p;
+  }
+
+  /** All live pickups. */
+  get pickups() {
+    return [...this._pickups];
   }
 
   // --- scatterable prop kinds ----------------------------------------------------

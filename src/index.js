@@ -40,9 +40,17 @@ export {
   decalFrame, decalOpacity, scorchTexture, bulletTexture, decalPresetNames,
   shaftFrame, cloudLayout, cloudTexture,
 } from './Rendering.js';
+// v0.7.0 — gameplay systems
+export {
+  Inventory, Health, QuestLog, Dialogue, Pickup, Hud,
+  normalizeItemId, parseBinding, normalizeBindings,
+  bindingHeld, bindingPressed, bindingReleased,
+  actionHeld, actionPressed, actionReleased,
+  inPickupRange,
+} from './Gameplay.js';
 // v0.4.0 — production hardening
 export { Profiler } from './Profiler.js';
 export { VWorldError, vError, createErrorBus, reportError } from './util/errors.js';
 export { QUALITY_LEVELS, resolveQuality, normalizeQuality, autoStep } from './util/quality.js';
 
-export const VERSION = '0.6.0';
+export const VERSION = '0.7.0';

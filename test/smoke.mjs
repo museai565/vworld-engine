@@ -23,6 +23,13 @@ import {
 import { VWorldError, vError, createErrorBus, reportError } from '../src/util/errors.js';
 import { Profiler } from '../src/Profiler.js';
 import { QUALITY_LEVELS, resolveQuality, normalizeQuality, autoStep } from '../src/util/quality.js';
+import {
+  Inventory, Health, QuestLog, Dialogue, Hud, Pickup,
+  normalizeItemId, parseBinding, normalizeBindings,
+  bindingHeld, bindingPressed, bindingReleased,
+  actionHeld, actionPressed, actionReleased,
+  inPickupRange,
+} from '../src/Gameplay.js';
 
 let pass = 0, fail = 0;
 const ok = (name, cond, extra = '') => {
@@ -556,6 +563,230 @@ console.log('\n== netcode v0.6.0 ==');
   ok('RewindBuffer.at', approx(rb.at(50).a.p[0], 5));
   const im = new InterestManager(10);
   ok('InterestManager filters', im.relevantIds({ p: [0, 0, 0] }, [{ id: 'a', p: [5, 0, 0] }, { id: 'b', p: [50, 0, 0] }]).join(',') === 'a');
+}
+
+// ---------------------------------------------------------------- v0.7.0 gameplay
+console.log('== Inventory ==');
+{
+  const inv = new Inventory();
+  ok('add default qty 1', inv.add('apple') === 1 && inv.count('apple') === 1);
+  ok('add stacks', inv.add('apple', 3) === 3 && inv.count('apple') === 4);
+  ok('has', inv.has('apple') && inv.has('apple', 4) && !inv.has('apple', 5) && !inv.has('pear'));
+  ok('object form', inv.add({ item: 'pear', qty: 2 }) === 2 && inv.count('pear') === 2);
+  ok('remove partial', inv.remove('apple', 2) === 2 && inv.count('apple') === 2);
+  ok('remove clamps', inv.remove('apple', 99) === 2 && inv.count('apple') === 0);
+  ok('list', JSON.stringify(inv.list()) === JSON.stringify([{ item: 'pear', qty: 2 }]));
+  ok('total/slots', inv.total === 2 && inv.slots === 1);
+  let evts = [];
+  inv.on('change', (e) => evts.push(e));
+  inv.add('coin', 5);
+  ok('change event', evts.length === 1 && evts[0].item === 'coin' && evts[0].delta === 5 && evts[0].action === 'add');
+  inv.remove('coin', 5);
+  ok('remove event frees slot', evts[1].action === 'remove' && inv.slots === 1);
+  const cap = new Inventory({ capacity: 5 });
+  ok('capacity partial', cap.add('x', 10) === 5 && cap.total === 5);
+  ok('capacity full -> 0', cap.add('y') === 0);
+  const slots = new Inventory({ maxSlots: 1 });
+  slots.add('a');
+  ok('maxSlots blocks new kind', slots.add('b') === 0 && slots.has('a'));
+  ok('maxSlots allows stack', slots.add('a', 2) === 2);
+  let threw = false;
+  try { normalizeItemId(42); } catch (e) { threw = /item id/.test(e.message); }
+  ok('bad item id throws helpful', threw);
+  let threw2 = false;
+  try { inv.add('z', -1); } catch (e) { threw2 = true; }
+  ok('negative qty throws', threw2);
+  inv.clear();
+  ok('clear', inv.total === 0 && evts[evts.length - 1].action === 'clear');
+}
+
+console.log('== Health ==');
+{
+  const hp = new Health(100);
+  ok('starts full', hp.hp === 100 && !hp.dead && hp.fraction === 1);
+  const log = [];
+  hp.on('damage', (e) => log.push(['dmg', e.amount]));
+  hp.on('heal', (e) => log.push(['heal', e.amount]));
+  hp.on('death', (e) => log.push(['death', e.source]));
+  ok('damage', hp.damage(30, 'lava') === 30 && hp.hp === 70);
+  ok('damage event', log[0][0] === 'dmg' && log[0][1] === 30);
+  ok('heal clamps', hp.heal(50) === 30 && hp.hp === 100);
+  ok('heal event', log[1][0] === 'heal' && log[1][1] === 30);
+  ok('overkill clamps', hp.damage(999, 'void') === 100 && hp.hp === 0 && hp.dead);
+  ok('death fires once', log.filter((l) => l[0] === 'death').length === 1 && log[log.length - 1][1] === 'void');
+  ok('dead ignores damage', hp.damage(10) === 0 && log.filter((l) => l[0] === 'dmg').length === 2);
+  ok('revive', hp.heal(25) === 25 && !hp.dead && hp.hp === 25);
+  ok('zero/negative no-op', hp.damage(0) === 0 && hp.heal(-5) === 0);
+  const hp2 = new Health({ max: 40, hp: 10 });
+  ok('object form', hp2.max === 40 && hp2.hp === 10 && approx(hp2.fraction, 0.25));
+  let threw = false;
+  try { new Health(0); } catch (e) { threw = true; }
+  ok('max 0 throws', threw);
+  let threw2 = false;
+  try { hp.on('explode', () => {}); } catch (e) { threw2 = true; }
+  ok('unknown event throws', threw2);
+}
+
+console.log('== QuestLog ==');
+{
+  const q = new QuestLog();
+  let started = 0, objEvts = [], completed = 0, rewardGot = null;
+  q.on('start', () => started++);
+  q.on('objective', (e) => objEvts.push(e));
+  q.on('complete', () => completed++);
+  q.define({
+    id: 'herbs', name: 'Herbal Remedy',
+    objectives: [{ id: 'pick', text: 'Pick moonherbs', target: 5 }, 'talk'],
+    reward: (quest) => { rewardGot = quest.id; },
+  });
+  ok('state locked', q.state('herbs') === 'locked' && q.state('nope') === 'unknown');
+  q.start('herbs');
+  ok('start event + active', started === 1 && q.state('herbs') === 'active');
+  q.advance('herbs', 'pick', 2);
+  ok('objective progress', q.objective('herbs', 'pick').count === 2 && !q.objective('herbs', 'pick').done);
+  ok('objective event', objEvts.length === 1 && objEvts[0].objective.count === 2);
+  q.advance('herbs', 'pick', 99);
+  ok('clamps at target', q.objective('herbs', 'pick').count === 5 && q.objective('herbs', 'pick').done);
+  ok('not complete yet', q.state('herbs') === 'active' && completed === 0);
+  q.advance('herbs', 'talk');
+  ok('complete + reward', q.state('herbs') === 'complete' && completed === 1 && rewardGot === 'herbs');
+  ok('advance after complete no-op', q.advance('herbs', 'talk').state('herbs') === 'complete');
+  q.reset('herbs');
+  ok('reset', q.state('herbs') === 'locked' && q.objective('herbs', 'pick').count === 0);
+  let threw = false;
+  try { q.start('missing'); } catch (e) { threw = /unknown quest/.test(e.message); }
+  ok('start unknown throws helpful', threw);
+  let threw2 = false;
+  try { q.define({ id: 'bad', objectives: [] }); } catch (e) { threw2 = true; }
+  ok('empty objectives throws', threw2);
+  ok('list', q.list().length === 1 && q.list()[0].objectives.length === 2);
+}
+
+console.log('== Dialogue ==');
+{
+  const dlg = new Dialogue({
+    start: 'hello',
+    nodes: {
+      hello: { text: 'Traveler! Got a moment?', choices: [{ text: 'Sure.', to: 'quest' }, 'Not now'] },
+      quest: { text: 'Bring me 5 moonherbs.', choices: [] },
+    },
+  });
+  const seen = [];
+  dlg.on('choice', (e) => seen.push(['choice', e.choice.text]));
+  dlg.on('end', (e) => seen.push(['end', e.node]));
+  dlg.on('node', (n) => seen.push(['node', n.id]));
+  ok('start node', dlg.node().id === 'hello' && dlg.node().choices.length === 2);
+  const next = dlg.choose(0);
+  ok('choose by index', next.id === 'quest' && seen[0][0] === 'choice' && seen[1][1] === 'quest');
+  ok('node with no choices', dlg.node().choices.length === 0 && !dlg.ended);
+  const dlg2 = new Dialogue({ start: 'a', nodes: { a: { text: 'Hi', choices: ['Bye'] } } });
+  let ended = false;
+  dlg2.on('end', () => { ended = true; });
+  ok('string choice ends', dlg2.choose('Bye') === null && ended && dlg2.ended && dlg2.node() === null);
+  let threw = false;
+  try { dlg2.choose(0); } catch (e) { threw = /already ended/.test(e.message); }
+  ok('choose after end throws', threw);
+  dlg2.reset();
+  ok('reset replays', !dlg2.ended && dlg2.node().id === 'a');
+  let threw2 = false;
+  try { dlg.choose(99); } catch (e) { threw2 = /no choice/.test(e.message); }
+  ok('bad choice index throws helpful', threw2);
+  let threw3 = false;
+  try { new Dialogue({ start: 'x', nodes: {} }); } catch (e) { threw3 = true; }
+  ok('bad tree throws', threw3);
+}
+
+console.log('== parseBinding / resolvers ==');
+{
+  ok('key', JSON.stringify(parseBinding('Space')) === JSON.stringify({ type: 'key', code: 'Space' }));
+  ok('mouse', JSON.stringify(parseBinding('mouse:2')) === JSON.stringify({ type: 'mouse', button: 2 }));
+  ok('pad button', JSON.stringify(parseBinding('gamepad:0')) === JSON.stringify({ type: 'padButton', pad: 0, button: 0 }));
+  ok('pad p:b', JSON.stringify(parseBinding('gamepad:1:5')) === JSON.stringify({ type: 'padButton', pad: 1, button: 5 }));
+  ok('pad axis', JSON.stringify(parseBinding('gamepad:axis0')) === JSON.stringify({ type: 'padAxis', pad: 0, axis: 0, dir: 0 }));
+  ok('pad axis+', JSON.stringify(parseBinding('gamepad:axis1+')) === JSON.stringify({ type: 'padAxis', pad: 0, axis: 1, dir: 1 }));
+  ok('pad p:axis-', JSON.stringify(parseBinding('gamepad:2:axis0-')) === JSON.stringify({ type: 'padAxis', pad: 2, axis: 0, dir: -1 }));
+  let threw = false;
+  try { parseBinding('mouse:9'); } catch (e) { threw = true; }
+  ok('bad binding throws', threw);
+  const kb = (keys = [], pressed = [], mouse = []) => ({
+    keys: new Set(keys), pressed: new Set(pressed), released: new Set(),
+    mouse: new Set(mouse), mousePressed: new Set(), mouseReleased: new Set(),
+  });
+  const pads = [{ buttons: [false, true], pressed: [false, true], released: [true, false], axes: [0.0, 0.8, -0.9] }, null];
+  ok('key held', bindingHeld(parseBinding('Space'), kb(['Space']), pads));
+  ok('key not held', !bindingHeld(parseBinding('Space'), kb(), pads));
+  ok('key pressed edge', bindingPressed(parseBinding('KeyW'), kb([], ['KeyW']), pads));
+  ok('mouse held', bindingHeld(parseBinding('mouse:0'), kb([], [], [0]), pads));
+  ok('pad button held', bindingHeld(parseBinding('gamepad:0'), kb(), [{ buttons: [true], pressed: [], released: [], axes: [] }]));
+  ok('pad button edge', bindingPressed(parseBinding('gamepad:1'), kb(), pads));
+  ok('pad axis+ held', bindingHeld(parseBinding('gamepad:axis1+'), kb(), pads));
+  ok('pad axis- held', bindingHeld(parseBinding('gamepad:axis2-'), kb(), pads));
+  ok('pad axis deadzone', !bindingHeld(parseBinding('gamepad:axis0'), kb(), pads));
+  ok('missing pad safe', !bindingHeld(parseBinding('gamepad:5'), kb(), pads));
+  const list = normalizeBindings(['Space', 'mouse:0']);
+  ok('normalizeBindings', list.length === 2 && list[0].code === 'Space');
+  ok('actionHeld any-of', actionHeld(list, kb([], [], [0]), pads));
+  ok('actionPressed any-of', actionPressed(list, kb(['Space'], ['Space']), pads));
+  ok('actionReleased none', !actionReleased(list, kb(['Space']), pads));
+  ok('single string normalizes', normalizeBindings('Space').length === 1);
+}
+
+console.log('== inPickupRange / Pickup grants ==');
+{
+  ok('inside', inPickupRange({ x: 0, y: 0, z: 0 }, 2, { x: 1, y: 0, z: 1 }));
+  ok('outside', !inPickupRange({ x: 0, y: 0, z: 0 }, 1, { x: 5, y: 0, z: 0 }));
+  ok('edge inclusive', inPickupRange({ x: 0, y: 0, z: 0 }, 1, { x: 1, y: 0, z: 0 }));
+  ok('y defaults 0', inPickupRange({ x: 0, z: 0 }, 1, { x: 0, z: 0.5 }));
+  // Pickup grant logic with fake collector (duck-typed inventory/health)
+  const mkCollector = () => ({ _inventory: new Inventory(), _health: new Health(100) });
+  const coin = new Pickup(null, { kind: 'coin', at: [0, 0, 0], item: 'coin', amount: 5, respawn: 10 });
+  ok('grantsFor', JSON.stringify(coin.grantsFor()) === JSON.stringify({ item: 'coin', amount: 5, heal: 0 }));
+  const c1 = mkCollector();
+  const g1 = coin.collectBy(c1);
+  ok('collect grants items', g1.amount === 5 && c1._inventory.count('coin') === 5 && !coin.active);
+  ok('inactive ignores', coin.collectBy(c1) === null);
+  coin.tick(5);
+  ok('respawn timer counts', !coin.active);
+  coin.tick(5);
+  ok('respawns', coin.active);
+  const heart = new Pickup(null, { kind: 'heart', at: [0, 0, 0], heal: 25, respawn: 0 });
+  const c2 = mkCollector();
+  c2._health.damage(50);
+  const g2 = heart.collectBy(c2);
+  ok('collect heals', g2.heal === 25 && c2._health.hp === 75);
+  ok('respawn 0 = one-shot', !heart.active);
+  heart.tick(999);
+  ok('never respawns', !heart.active);
+  const c3 = mkCollector(); // full health, no item configured
+  const nothing = new Pickup(null, { at: [0, 0, 0], heal: 10, respawn: 5 });
+  ok('no grant when full hp', nothing.collectBy(c3) === null && nothing.active);
+  let threw = false;
+  try { new Pickup(null, { radius: 0 }); } catch (e) { threw = true; }
+  ok('bad radius throws', threw);
+}
+
+console.log('== Hud (node-safe no-op) ==');
+{
+  const hud = new Hud(null);
+  ok('not supported in node', hud.supported === false);
+  // Every method must no-op cleanly and stay chainable without a DOM.
+  let threw = false;
+  try {
+    const r = hud.bar('hp', 0.75, { label: 'HP' })
+      .bar('mp', 1.2)               // clamps, no-ops
+      .removeBar('hp')
+      .prompt('Press E')
+      .clearPrompt()
+      .crosshair(true)
+      .crosshair(false)
+      .objective('Pick moonherbs (2/5)')
+      .clearObjective()
+      .hide()
+      .show()
+      .dispose();
+    threw = r !== hud;
+  } catch (e) { threw = true; }
+  ok('all methods no-op + chainable', !threw);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

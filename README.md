@@ -455,6 +455,100 @@ app.input.lockPointer();      // pointer lock for mouse-look
 app.input.enabled = false;    // freeze game input (e.g. while typing in chat)
 ```
 
+**Action mapping (v0.7.0)** — bind names to keyboard / mouse / gamepad once, read actions everywhere. Gamepads are polled automatically every frame.
+
+```js
+app.input.map({
+  jump:  ['Space', 'gamepad:0'],      // keyboard OR pad button 0
+  fire:  ['mouse:0', 'gamepad:7'],    // mouse OR pad button 7
+  left:  ['KeyA', 'gamepad:axis0-'],  // key OR left stick left
+  right: ['KeyD', 'gamepad:axis0+'],
+});
+app.input.action('jump');          // held?
+app.input.actionPressed('fire');   // pressed this frame?
+app.input.actionAxis('left', 'right'); // -1..1 from two actions
+```
+
+Binding strings: `'Space'` (keyboard `event.code`), `'mouse:0'` (0=left 1=middle 2=right), `'gamepad:0'` (pad 0 button 0), `'gamepad:1:5'` (pad 1 button 5), `'gamepad:axis0'` / `'gamepad:axis1+'` / `'gamepad:2:axis0-'`. The pure resolvers (`parseBinding`, `bindingHeld`, `actionHeld`, …) are exported for tests and custom loops.
+
+## Gameplay systems (v0.7.0)
+
+Everything a small game needs, with the same normalize-don't-complain DX. Pure logic (inventory math, health, quest state machine, dialogue walker, binding resolution) is DOM/THREE-free and unit-tested in `test/smoke.mjs`.
+
+**Inventory** — stackable items, capacity limits, change events:
+
+```js
+const inv = player.inventory({ capacity: 99, maxSlots: 12 }); // lazy, per-entity
+inv.on('change', ({ item, delta, total }) => hud.bar('weight', total / 99));
+inv.add('coin', 5);   // add('coin') and add({ item: 'coin', qty: 5 }) work too
+inv.has('coin', 3);   // true
+inv.remove('coin', 2);
+inv.count('coin');    // 3
+inv.list();           // [{ item: 'coin', qty: 3 }]
+```
+
+**Health / damage** — damage, heal, death events; lava and other damaging fluids hurt entities automatically:
+
+```js
+const hp = player.health(100);
+hp.on('damage', ({ amount, hp }) => hud.bar('hp', hp / 100));
+hp.on('death', () => respawn(player));
+hp.damage(30, { source: 'lava' });
+hp.heal(10);
+hp.dead; // false
+```
+
+**Pickups** — auto-collect zones that grant items/health and respawn:
+
+```js
+world.pickup({ kind: 'coin', at: [10, 1, 4], radius: 1.6, item: 'coin', amount: 5, respawn: 12 });
+world.pickup({ kind: 'heart', at: [4, 1, -8], heal: 25, respawn: 20,
+               onCollect: ({ entity }) => app.effects.burst({ type: 'sparkle', at: entity }) });
+```
+
+**Quests** — definitions, objective progress, completion rewards:
+
+```js
+const q = app.quests();
+q.define({ id: 'herbs', name: 'Herbal Remedy',
+           objectives: [{ id: 'pick', text: 'Pick moonherbs', target: 5 }],
+           reward: () => player.inventory().add('potion') });
+q.on('objective', ({ objective }) => hud.objective(`${objective.text} (${objective.count}/${objective.target})`));
+q.on('complete', ({ quest }) => hud.objective(''));
+q.start('herbs');
+q.advance('herbs', 'pick', 2);
+q.state('herbs'); // 'locked' | 'active' | 'complete'
+```
+
+**Dialogue trees** — node/choice walker for NPCs:
+
+```js
+const dlg = app.dialogue({
+  start: 'hello',
+  nodes: {
+    hello: { text: 'Traveler! Got a moment?',
+             choices: [{ text: 'Sure.', to: 'quest' }, 'Not now'] }, // string choice ends the branch
+    quest: { text: 'Bring me 5 moonherbs.', choices: [] },
+  },
+});
+dlg.on('choice', ({ choice }) => console.log('picked:', choice.text));
+dlg.on('end', () => console.log('conversation over'));
+dlg.choose(0); // or choose('Sure.')
+```
+
+**HUD** — DOM overlay helpers; every method chains and safely no-ops in node (no DOM):
+
+```js
+const hud = app.hud();
+hud.bar('hp', player.health().fraction, { label: 'HP', color: '#e5484d' });
+hud.prompt('Press E to talk');   // hud.clearPrompt()
+hud.crosshair(true);
+hud.objective('Pick moonherbs (2/5)'); // hud.clearObjective()
+hud.hide(); hud.show();          // toggle everything
+```
+
+**Gamepad** — see Input above. Pads are polled in the frame loop (`input.gamepads` lists them); bindings unify keyboard, mouse, and pad buttons/axes under action names.
+
 ## Build helpers (game-layer primitives)
 
 ```js

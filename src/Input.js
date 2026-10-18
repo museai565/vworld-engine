@@ -1,9 +1,23 @@
+import { parseBinding, normalizeBindings, actionHeld, actionPressed, actionReleased } from './Gameplay.js';
+
 /**
  * Input — unified keyboard / mouse / touch state.
  *
  *   app.input.key('KeyW')      // is the key held right now?
  *   app.input.pressed('Space') // was it pressed down *this frame*?
  *   app.input.axis('KeyA', 'KeyD') // -1..1 convenience
+ *
+ * v0.7.0 — action mapping + gamepads:
+ *
+ *   app.input.map({ jump: ['Space', 'gamepad:0'], fire: ['mouse:0', 'gamepad:7'] });
+ *   app.input.action('jump');         // held?
+ *   app.input.actionPressed('fire');  // pressed this frame?
+ *   app.input.actionAxis('left', 'right');
+ *
+ * Binding strings: 'Space' (keyboard code), 'mouse:0' (0=left 1=middle 2=right),
+ * 'gamepad:0' (pad 0 button 0), 'gamepad:1:5' (pad 1 button 5),
+ * 'gamepad:axis0' / 'gamepad:axis1+' / 'gamepad:2:axis0-'.
+ * Gamepads are polled every frame; everything is a no-op without a DOM/navigator.
  *
  * Mouse deltas (`input.pointer.dx/dy`) accumulate between frames and are
  * cleared each frame by `update()` — the engine calls it automatically.
@@ -17,6 +31,16 @@ export class Input {
     this._released = new Set();
     this.pointer = { x: 0, y: 0, dx: 0, dy: 0, down: false };
     this.touches = new Map();
+
+    // --- v0.7.0: mouse buttons, action bindings, gamepads -------------------
+    this._mouse = new Set();
+    this._mousePressed = new Set();
+    this._mouseReleased = new Set();
+    /** action name -> parsed binding list */
+    this._bindings = new Map();
+    /** per-frame gamepad snapshots: [{ buttons, pressed, released, axes }] */
+    this._pads = [];
+    this._padPrev = [];
 
     /**
      * Master switch for game input. When false, key()/pressed()/released()/
@@ -47,8 +71,16 @@ export class Input {
       this.pointer.dx += e.movementX || 0;
       this.pointer.dy += e.movementY || 0;
     });
-    canvas.addEventListener('mousedown', () => { this.pointer.down = true; });
-    window.addEventListener('mouseup', () => { this.pointer.down = false; });
+    canvas.addEventListener('mousedown', (e) => {
+      this.pointer.down = true;
+      if (!this._mouse.has(e.button)) this._mousePressed.add(e.button);
+      this._mouse.add(e.button);
+    });
+    window.addEventListener('mouseup', (e) => {
+      this.pointer.down = false;
+      this._mouse.delete(e.button);
+      this._mouseReleased.add(e.button);
+    });
 
     canvas.addEventListener('touchstart', (e) => {
       for (const t of e.changedTouches) this.touches.set(t.identifier, { x: t.clientX, y: t.clientY });
@@ -87,6 +119,121 @@ export class Input {
     return (this.key(positive) ? 1 : 0) - (this.key(negative) ? 1 : 0);
   }
 
+  // --- v0.7.0: action mapping (keyboard / mouse / gamepad unified) --------------
+
+  /**
+   * Bind action names to inputs. Accepts an object or (action, bindings):
+   *
+   *   input.map({ jump: ['Space', 'gamepad:0'], fire: 'mouse:0' });
+   *   input.map('sprint', ['ShiftLeft', 'gamepad:1:5']);
+   *
+   * Binding strings: 'Space' (keyboard code), 'mouse:0' (0=left 1=middle
+   * 2=right), 'gamepad:0' (pad 0 button 0), 'gamepad:1:5' (pad 1 button 5),
+   * 'gamepad:axis0', 'gamepad:axis1+', 'gamepad:2:axis0-'. Re-calling for an
+   * action replaces its bindings. Chainable.
+   */
+  map(def, bindings) {
+    const entries = bindings === undefined ? Object.entries(def ?? {}) : [[def, bindings]];
+    for (const [action, b] of entries) {
+      if (typeof action !== 'string' || action.length === 0) {
+        throw new Error('[VWorld] input.map() — action names must be non-empty strings.');
+      }
+      this._bindings.set(action, normalizeBindings(b));
+    }
+    return this;
+  }
+
+  /** Remove an action's bindings. Chainable. */
+  unmap(action) {
+    this._bindings.delete(action);
+    return this;
+  }
+
+  /** Action names currently bound. */
+  actions() {
+    return [...this._bindings.keys()];
+  }
+
+  /** Raw parsed bindings for an action (for debugging). */
+  bindingsFor(action) {
+    return [...(this._bindings.get(action) ?? [])];
+  }
+
+  _kbState() {
+    return {
+      keys: this.keys, pressed: this._pressed, released: this._released,
+      mouse: this._mouse, mousePressed: this._mousePressed, mouseReleased: this._mouseReleased,
+    };
+  }
+
+  /** Is any binding of this action currently held? */
+  action(name) {
+    if (!this.enabled) return false;
+    const b = this._bindings.get(name);
+    return b ? actionHeld(b, this._kbState(), this._pads) : false;
+  }
+
+  /** Was any binding of this action pressed down this frame? */
+  actionPressed(name) {
+    if (!this.enabled) return false;
+    const b = this._bindings.get(name);
+    return b ? actionPressed(b, this._kbState(), this._pads) : false;
+  }
+
+  /** Was any binding of this action released this frame? */
+  actionReleased(name) {
+    if (!this.enabled) return false;
+    const b = this._bindings.get(name);
+    return b ? actionReleased(b, this._kbState(), this._pads) : false;
+  }
+
+  /** -1..1 from two actions, e.g. actionAxis('moveLeft', 'moveRight'). */
+  actionAxis(negative, positive) {
+    if (!this.enabled) return 0;
+    return (this.action(positive) ? 1 : 0) - (this.action(negative) ? 1 : 0);
+  }
+
+  /** Is mouse button `button` (0=left, 1=middle, 2=right) held? */
+  mouseButton(button) {
+    if (!this.enabled) return false;
+    return this._mouse.has(button);
+  }
+
+  /** Snapshot of connected gamepads (empty array without navigator). */
+  get gamepads() {
+    return this._pads.map((p, i) => ({ index: i, buttons: p.buttons.length, axes: p.axes.length }));
+  }
+
+  /** Poll navigator.getGamepads() into edge-detected snapshots. Node-safe. */
+  _pollGamepads() {
+    if (typeof navigator === 'undefined' || typeof navigator.getGamepads !== 'function') {
+      this._pads = [];
+      this._padPrev = [];
+      return;
+    }
+    let raw;
+    try {
+      raw = navigator.getGamepads();
+    } catch {
+      return;
+    }
+    const next = [];
+    const prev = this._padPrev;
+    let i = 0;
+    for (const gp of raw ?? []) {
+      if (!gp) { i++; continue; }
+      const buttons = gp.buttons.map((b) => !!b.pressed);
+      const axes = [...gp.axes];
+      const pPrev = prev[i];
+      const pressed = buttons.map((b, bi) => b && !(pPrev?.buttons[bi]));
+      const released = buttons.map((b, bi) => !b && pPrev?.buttons[bi]);
+      next[i] = { buttons, pressed, released, axes };
+      i++;
+    }
+    this._pads = next;
+    this._padPrev = next.map((p) => (p ? { buttons: p.buttons } : null));
+  }
+
   /** Request pointer lock on the canvas (for mouse-look). */
   lockPointer() {
     const canvas = this.engine.options.canvas;
@@ -105,8 +252,11 @@ export class Input {
 
   /** Called once per rendered frame by the engine. Clears edge states. */
   update() {
+    this._pollGamepads();
     this._pressed.clear();
     this._released.clear();
+    this._mousePressed.clear();
+    this._mouseReleased.clear();
     this.pointer.dx = 0;
     this.pointer.dy = 0;
     return this;

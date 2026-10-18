@@ -329,7 +329,14 @@ export class FluidSystem {
           }
           // Damage (lava etc.).
           if (def.damage > 0 && f > 0.25) {
-            fluid._emit('damage', body, { fluid, body, entity: ent, amount: def.damage * f * dt, fraction: f });
+            const amt = def.damage * f * dt;
+            fluid._emit('damage', body, { fluid, body, entity: ent, amount: amt, fraction: f });
+            // v0.7.0: entities carrying a Health pool take the damage directly
+            // (duck-typed — no import cycle with Gameplay.js).
+            const hp = ent && ent._health;
+            if (hp && typeof hp.damage === 'function') {
+              try { hp.damage(amt, { source: fluid.type, fluid: fluid.name }); } catch (err) { console.error('[VWorld] health damage handler threw:', err); }
+            }
           }
         }
       });

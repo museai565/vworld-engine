@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { toVec3, toNumber, withDefaults } from './util/normalize.js';
 import { vError, reportError } from './util/errors.js';
 import { normalizeLodLevels, selectLod } from './Rendering.js';
+import { Inventory, Health } from './Gameplay.js';
 
 let _nextId = 1;
 let _destroyWarned = false;
@@ -34,6 +35,8 @@ export class Entity {
     this._animator = null;
     this._disposed = false;
     this._lod = null;             // { levels, ticker } — set by lod()
+    this._inventory = null;       // lazy Inventory — see inventory()
+    this._health = null;          // lazy Health — see health()
   }
 
   // --- tags --------------------------------------------------------------------
@@ -299,6 +302,27 @@ export class Entity {
   /** The active LOD level index, or -1 when lod() was never called. */
   get lodIndex() {
     return this._lod ? this._lod.current : -1;
+  }
+
+  // --- gameplay (v0.7.0) ------------------------------------------------------------
+  /**
+   * This entity's inventory (created lazily on first call).
+   *   player.inventory().add('coin', 5);
+   *   player.inventory({ capacity: 20, maxSlots: 8 }); // options only apply on first call
+   */
+  inventory(options) {
+    if (!this._inventory) this._inventory = new Inventory(options ?? {}, this.engine);
+    return this._inventory;
+  }
+
+  /**
+   * This entity's health pool (created lazily on first call).
+   *   player.health(100).on('death', () => respawn(player));
+   *   goblin.health({ max: 40 }).damage(12, { source: 'arrow' });
+   */
+  health(max) {
+    if (!this._health) this._health = new Health(max ?? 100, this.engine);
+    return this._health;
   }
 
   /**

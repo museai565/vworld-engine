@@ -16,6 +16,7 @@ import {
   InstancedSet, Decal, CloudLayer, LightShaft,
   makeMaterial, resolveShadowConfig,
 } from './Rendering.js';
+import { QuestLog, Dialogue, Hud } from './Gameplay.js';
 
 /**
  * VWorld Engine — core application object.
@@ -90,6 +91,10 @@ export class Engine {
 
     // --- v0.5.0: rendering handles (instanced sets, decals, clouds, shafts)
     this._renderHandles = new Set();
+
+    // --- v0.7.0: gameplay handles --------------------------------------------------
+    this._quests = null;          // lazy QuestLog — see quests()
+    this._hud = null;             // lazy Hud — see hud()
 
     // --- v0.4.0: disposal / debug / quality ----------------------------------
     this._disposed = false;
@@ -439,6 +444,12 @@ export class Engine {
     }
     this._renderHandles.clear();
 
+    // v0.7.0: tear down the HUD overlay.
+    if (this._hud) {
+      try { this._hud.dispose(); } catch (err) { this._errorBus.report(err); }
+      this._hud = null;
+    }
+
     this.stop();
     const canvas = this.options.canvas;
     if (canvas) {
@@ -498,6 +509,43 @@ export class Engine {
   }
 
   // --- rendering richness (v0.5.0) ----------------------------------------------
+
+  // --- gameplay systems (v0.7.0) ------------------------------------------------------
+
+  /**
+   * The world's quest log (created lazily). Define quests, advance
+   * objectives, and run completion rewards:
+   *
+   *   app.quests().define({ id: 'herbs', objectives: [{ id: 'pick', text: 'Pick moonherbs', target: 5 }] });
+   *   app.quests().on('complete', ({ quest }) => hud.objective(''));
+   *   app.quests().start('herbs');
+   */
+  quests() {
+    if (!this._quests) this._quests = new QuestLog(this);
+    return this._quests;
+  }
+
+  /**
+   * Walk a branching dialogue tree (used for NPC conversations):
+   *
+   *   const dlg = app.dialogue({ start: 'hi', nodes: { hi: { text: 'Hello!', choices: ['Bye'] } } });
+   *   dlg.on('end', () => ...);
+   *   dlg.choose(0);
+   */
+  dialogue(tree) {
+    return new Dialogue(tree, this);
+  }
+
+  /**
+   * Screen-space HUD overlay: health bars, prompts, crosshair, objective
+   * tracker. Created lazily; every method safely no-ops without a DOM.
+   *
+   *   app.hud().bar('hp', 0.8).prompt('Press E').crosshair(true);
+   */
+  hud() {
+    if (!this._hud) this._hud = new Hud(this);
+    return this._hud;
+  }
 
   /**
    * One draw call for many copies: crowds, forests, grass tufts, debris.
