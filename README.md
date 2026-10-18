@@ -3,6 +3,12 @@
 A Laravel-DX-flavored 3D game engine built on **Three.js** + **Rapier physics** (WASM).
 Fluent, chainable APIs. Sensible defaults. One line gets a running scene.
 
+> **v1.0.0 — API freeze.** The public API is frozen for the whole v1 series:
+> no removals, no signature changes — only additive features. See
+> [Deprecation policy](#deprecation-policy--api-freeze) and
+> [docs/08-migration-from-0x.md](docs/08-migration-from-0x.md). Full guides in
+> [`docs/`](docs/) and five runnable demos in [`examples/`](examples/).
+>
 > **v0.4.0 — production hardening.** TypeScript definitions for the full
 > public API, a central error bus (`app.onError`) with machine-readable
 > error codes, full resource disposal (`entity.dispose()` / `app.dispose()`)
@@ -937,6 +943,52 @@ yield a fresh `THREE.Color`. Garbage throws a helpful error.
 
 ## Demo playground
 
+The main playground lives at `examples/playground` (`npm run dev`, port 5173).
+The **examples gallery** (`node scripts/build-examples.mjs` builds all five):
+
+| Example | Shows |
+|---|---|
+| `playground` | full engine tour: terrain, fluids, AI, hinge door, campfire |
+| `weather-showcase` | rain/snow/storm/fog, lightning scorch decals, wind drift |
+| `netcode-demo` | client prediction + reconciliation, 120 ms loopback latency |
+| `village` | prefab library + chunk streaming around the player |
+| `quest-playground` | quests, dialogue, pickups, HUD, health, gamepad rebinding |
+
+> None of the examples were eyeballed in a browser during v1.0.0 development
+> (no browser in the build environment) — everything is verified up to the
+> render boundary. A visual pass is recommended.
+
+## Guides
+
+Full guides live in [`docs/`](docs/):
+
+- [00 — Getting started](docs/00-getting-started.md)
+- [01 — Core concepts](docs/01-core-concepts.md) (World, Entity, Physics)
+- [02 — Production](docs/02-production.md) (errors, disposal, quality, profiler)
+- [03 — Rendering](docs/03-rendering.md) (instancing, LOD, decals, materials, surfaces, fluids)
+- [04 — Netcode](docs/04-netcode.md) (prediction, interpolation, lag compensation)
+- [05 — Gameplay](docs/05-gameplay.md) (inventory, health, quests, dialogue, HUD, gamepad)
+- [06 — Persistence](docs/06-persistence.md) (save/load, chunk streaming, prefabs)
+- [07 — Weather](docs/07-weather.md) (precipitation, storms, wind, day/night)
+- [08 — Migration from 0.x](docs/08-migration-from-0x.md)
+
+## Deprecation policy & API freeze
+
+v1.0.0 freezes the public API for the entire v1 series:
+
+1. **Nothing is removed, no signatures change.** New features are purely
+   additive — new methods, new options, new exports.
+2. **Renames become shims.** If an API must be renamed, the old name keeps
+   working (with a one-time `console.warn`) for all of v1.x. Example:
+   `entity.destroy()` → `entity.dispose()`.
+3. **Breaking changes wait for v2** and ship with a migration guide like
+   `docs/08-migration-from-0x.md`.
+4. **The frozen surface** is everything exported from `src/index.js` plus the
+   TypeScript definitions in `index.d.ts` — methods, event names, error codes
+   (`VWORLD/...`), save-format migrations, and pure utility functions.
+
+## API decisions
+
 ```bash
 npm run dev      # open http://localhost:5173
 npm run build    # production build -> dist/
@@ -954,6 +1006,9 @@ and a physics player. Click the scene for sparkles + positional thuds
 
 ## API decisions
 
+- **v1.0.0 API freeze** — every public method, event name, and pure-utility
+  export documented here is frozen for v1.x. See
+  [Deprecation policy](#deprecation-policy--api-freeze).
 - **Rapier via `@dimforge/rapier3d-compat`** — pure WASM, no native toolchain.
 - **Full-extent collider sizes** in the builder (`.cuboid(1,1,1)` = 1 m cube).
 - **Fixed-timestep physics** (60 Hz accumulator) separate from rendering.

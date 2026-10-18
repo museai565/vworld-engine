@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>VWorld — Weather Showcase</title>
+  <style>html,body{margin:0;height:100%;overflow:hidden;background:#000}
+  canvas{display:block}#hud{position:fixed;left:12px;top:12px;color:#fff;font:13px/1.6 system-ui;background:rgba(0,0,0,.45);padding:10px 12px;border-radius:8px;pointer-events:none}
+  #hud b{color:#ffd97a}kbd{background:#222;border:1px solid #555;border-radius:4px;padding:0 6px}</style>
+</head>
+<body>
+  <canvas id="scene"></canvas>
+  <div id="hud"><b>Weather showcase</b><br>
+  <kbd>1</kbd> clear · <kbd>2</kbd> rain · <kbd>3</kbd> snow · <kbd>4</kbd> storm · <kbd>5</kbd> fog<br>
+  <kbd>D</kbd> toggle dusk/day · lightning strikes scorch the ground</div>
+  <script type="module" src="./main.js"></script>
+</body>
+</html>

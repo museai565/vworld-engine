@@ -74,4 +74,4 @@ export { Profiler } from './Profiler.js';
 export { VWorldError, vError, createErrorBus, reportError } from './util/errors.js';
 export { QUALITY_LEVELS, resolveQuality, normalizeQuality, autoStep } from './util/quality.js';
 
-export const VERSION = '0.9.0';
+export const VERSION = '1.0.0';
