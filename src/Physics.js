@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { toVec3, toXYZ, toNumber, toAxis, withDefaults } from './util/normalize.js';
+import { vError } from './util/errors.js';
 
 /**
  * Physics — Rapier (WASM) wrapped in a Laravel-flavored fluent API.
@@ -42,7 +43,7 @@ export class Physics {
 
   _assertReady() {
     if (!this.world) {
-      throw new Error('[VWorld] Physics used before WASM init — `await app.ready` before creating bodies.');
+      throw vError('VWORLD/PHYSICS_NOT_READY', '[VWorld] Physics used before WASM init — `await app.ready` before creating bodies.');
     }
   }
 
@@ -318,7 +319,7 @@ export class Body {
    */
   on(event, fn) {
     if (!this._entity) {
-      throw new Error('[VWorld] body.on() needs a bound entity — .bind(entity) first.');
+      throw vError('VWORLD/BODY_NOT_BOUND', '[VWorld] body.on() needs a bound entity — .bind(entity) first.');
     }
     return this._entity.on(event, fn);
   }
@@ -420,7 +421,7 @@ class JointBuilder {
   _bodies(a, b, what) {
     this.p._assertReady();
     for (const [v, n] of [[a, 'bodyA'], [b, 'bodyB']]) {
-      if (!v || !v.raw) throw new Error(`[VWorld] joint.${what}() needs physics Bodies — ${n} isn't one. Build with app.physics.body()...build().`);
+      if (!v || !v.raw) throw vError('VWORLD/BAD_BODY', `[VWorld] joint.${what}() needs physics Bodies — ${n} isn't one. Build with app.physics.body()...build().`);
     }
     return [a, b];
   }

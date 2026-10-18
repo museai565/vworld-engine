@@ -152,6 +152,6 @@ export class PlayerController {
   destroy() {
     this.cc.free();
     this.body.destroy();
-    this.entity.destroy();
+    this.entity.dispose();
   }
 }

@@ -1,0 +1,593 @@
+/**
+ * VWorld Engine — TypeScript definitions (v0.4.0).
+ *
+ *   import { Engine, VWorldError, type QualityMode } from '@vworld/engine';
+ *
+ * These mirror the runtime public API exported from src/index.js.
+ */
+import * as THREE from 'three';
+
+/** Anything a position-like API accepts (the normalize-don't-complain law). */
+export type Vec3Input =
+  | number
+  | [number, number, number]
+  | number[]
+  | { x: number; y?: number; z?: number }
+  | THREE.Vector3
+  | THREE.Object3D
+  | Entity;
+
+/** Plugin contract for `app.use()`. */
+export interface VWorldPlugin {
+  name: string;
+  install(app: Engine, options?: Record<string, unknown>): void;
+}
+
+export type EngineEventName = 'tick' | 'render' | 'dispose' | 'contextlost' | 'contextrestored';
+export type QualityLevel = 'high' | 'medium' | 'low';
+export type QualityMode = QualityLevel | 'auto';
+
+export interface EngineOptions {
+  canvas: HTMLCanvasElement;
+  antialias?: boolean;
+  pixelRatio?: number;
+  fixedDt?: number;
+  maxFrameDt?: number;
+  fov?: number;
+  near?: number;
+  far?: number;
+  shadows?: boolean;
+  debug?: boolean;
+}
+
+/** Machine-readable error codes thrown or reported by the engine. */
+export type VWorldErrorCode =
+  | 'VWORLD/MISSING_CANVAS'
+  | 'VWORLD/APP_DISPOSED'
+  | 'VWORLD/BAD_PLUGIN'
+  | 'VWORLD/PLUGIN_INSTALL_FAILED'
+  | 'VWORLD/UNKNOWN_EVENT'
+  | 'VWORLD/EVENT_HANDLER_THREW'
+  | 'VWORLD/BAD_HANDLER'
+  | 'VWORLD/PHYSICS_NOT_READY'
+  | 'VWORLD/BODY_NOT_BOUND'
+  | 'VWORLD/BAD_BODY'
+  | 'VWORLD/PLUGIN_MISSING'
+  | 'VWORLD/UNKNOWN_QUALITY'
+  | 'VWORLD/BAD_QUALITY'
+  | string;
+
+/**
+ * Engine — the core application object.
+ *
+ *   const app = Engine.create({ canvas }).start();
+ */
+export class Engine {
+  static create(options?: EngineOptions): Engine;
+  static EVENTS: EngineEventName[];
+
+  constructor(options?: EngineOptions);
+
+  readonly options: EngineOptions;
+  readonly renderer: THREE.WebGLRenderer;
+  readonly scene: THREE.Scene;
+  readonly camera: THREE.PerspectiveCamera;
+  readonly world: World;
+  readonly physics: Physics;
+  readonly input: Input;
+  readonly assets: Assets;
+  readonly net: Net;
+  readonly build: Build;
+  readonly ai: AI;
+  readonly time: Time;
+  readonly ready: Promise<this>;
+
+  /** Begin the frame loop (waits for Rapier WASM internally). Throws VWORLD/APP_DISPOSED after dispose(). */
+  start(): this;
+  /** Stop the frame loop. */
+  stop(): this;
+  /** Full teardown — loop, listeners, entities, renderer. Idempotent. */
+  dispose(): this;
+
+  /** Install a plugin: `app.use(AudioPlugin)` or `app.use(AudioPlugin, {...})`. */
+  use(plugin: VWorldPlugin, options?: Record<string, unknown>): this;
+  /** Is a plugin installed? `app.using('audio')`. */
+  using(name: string): boolean;
+
+  /** Subscribe to an engine error (internal catch sites report here). Chainable. */
+  onError(fn: (err: Error) => void): this;
+  /** Remove a previously registered error handler. Chainable. */
+  offError(fn: (err: Error) => void): this;
+
+  /** Toggle debug mode (leak detection on dispose). Chainable. */
+  debug(flag?: boolean): this;
+
+  /**
+   * Set quality ('high'|'medium'|'low'|'auto' or `{ level }`); no args returns
+   * the current effective level. Chainable when setting.
+   */
+  quality(level: QualityMode | { level: QualityMode }): this;
+  quality(): QualityLevel;
+
+  /** The engine profiler — built-in sections 'fixed', 'frame', 'render'. */
+  profiler(): Profiler;
+
+  /** Subscribe to an engine lifecycle event. Chainable. */
+  on(event: EngineEventName, fn: (dt?: number) => void): this;
+  /** Unsubscribe. Chainable. */
+  off(event: EngineEventName, fn: (dt?: number) => void): this;
+
+  /** Called every fixed physics tick. Chainable. */
+  onFixedUpdate(fn: (dt: number) => void): this;
+  /** Called every rendered frame. Chainable. */
+  onUpdate(fn: (dt: number) => void): this;
+  /** Remove a previously added updater. Chainable. */
+  offUpdate(fn: (dt: number) => void): this;
+
+  /** Create an Entity already added to the scene. */
+  entity(): Entity;
+  /** Add an Entity (or raw Object3D) to the scene. */
+  add(thing: Entity | THREE.Object3D): this;
+  /** Re-sync renderer size to the canvas. */
+  resize(): this;
+}
+
+/**
+ * Entity — a chainable wrapper around a THREE.Group.
+ *
+ *   app.entity().box(2, 1, 2, 0x8844ff).at(0, 0.5, 0).rotateY(0.4);
+ */
+export class Entity {
+  constructor(engine?: Engine | null);
+  readonly id: string;
+  readonly object: THREE.Group;
+  readonly engine: Engine | null;
+  readonly tags: string[];
+
+  tag(name: string): this;
+  untag(name: string): this;
+  hasTag(name: string): boolean;
+
+  mesh(geometry: THREE.BufferGeometry, material: THREE.Material | THREE.Material[]): this;
+  box(w: number, h: number, d: number, color?: number): this;
+  sphere(r: number, color?: number, segments?: number): this;
+  capsule(radius: number, length: number, color?: number): this;
+  cylinder(rTop: number, rBottom: number, height: number, color?: number): this;
+  /** Recolor every mesh in this entity. */
+  colored(hex: number): this;
+
+  at(...args: Vec3Input[]): this;
+  moveBy(...args: Vec3Input[]): this;
+  moveTo(dest: Vec3Input, options?: { speed?: number; arrive?: number; onArrive?: (entity: Entity) => void }): this;
+  stopMove(): this;
+  rotateX(a: number): this;
+  rotateY(a: number): this;
+  rotateZ(a: number): this;
+  rotation(x: number, y: number, z: number): this;
+  scale(s: number): this;
+  scaleXYZ(x: number, y: number, z: number): this;
+  lookAt(...args: Vec3Input[]): this;
+  show(): this;
+  hide(): this;
+  attach(...children: Array<Entity | Entity[]>): this;
+  /** Alias kept for v0.1.0 compatibility. */
+  child(entity: Entity): this;
+
+  on(event: 'collide' | `collide:${string}` | 'enter' | 'exit', fn: (...args: any[]) => void): this;
+  off(event: string, fn: (...args: any[]) => void): this;
+
+  /** Animator for this entity — requires app.use(AnimationPlugin) first. */
+  anim(): Animator;
+  /** Run `fn(dt, entity)` every rendered frame. Removed on dispose(). */
+  onUpdate(fn: (dt: number, entity: Entity) => void): this;
+
+  /**
+   * Full teardown: tickers, GPU resources, physics body, scene removal.
+   * Idempotent. Chainable.
+   */
+  dispose(): this;
+  /** @deprecated Use dispose() instead. */
+  destroy(): this;
+
+  /** Plain-data snapshot for replication. */
+  serialize(): { id: string; p: [number, number, number]; q: [number, number, number, number]; s: [number, number, number] };
+  /** Apply a snapshot produced by serialize(). */
+  applySnapshot(snap: { p?: number[]; q?: number[]; s?: number[] }): this;
+}
+
+/** Physics — Rapier (WASM) wrapped in a fluent API. */
+export class Physics {
+  gravity(x: number, y: number, z?: number): this;
+  eachBody(fn: (body: Body) => void): void;
+  /** Start building a rigid body. */
+  body(): BodyBuilder;
+  /** Start building a joint between two bodies. */
+  joint(): JointBuilder;
+  vehicle(chassisBody: Body, options?: Record<string, unknown>): Vehicle;
+  /** Step the simulation (called by the engine loop). */
+  step(dt: number): this;
+  /** Toggle the Rapier debug renderer overlay. */
+  debug(show: boolean): this;
+  characterController(offset?: number): unknown;
+}
+
+/** Fluent rigid-body builder: `app.physics.body().dynamic().cuboid(1,1,1).at(0,5,0).build()`. */
+export class BodyBuilder {
+  dynamic(): this;
+  static(): this;
+  kinematicPosition(): this;
+  at(x: number, y: number, z: number): this;
+  cuboid(w: number, h: number, d: number): this;
+  ball(radius: number): this;
+  capsule(halfHeight: number, radius: number): this;
+  friction(f: number): this;
+  restitution(e: number): this;
+  density(d: number): this;
+  sensor(v?: boolean): this;
+  bind(entity: Entity): this;
+  build(): Body;
+}
+
+/** A live rigid body in the Rapier world. */
+export class Body {
+  bind(entity: Entity): this;
+  on(event: string, fn: (...args: any[]) => void): this;
+  translation(): { x: number; y: number; z: number };
+  rotation(): { x: number; y: number; z: number; w: number };
+  teleport(x: number, y: number, z: number): this;
+  setNextTranslation(x: number, y: number, z: number): this;
+  applyImpulse(x: number, y: number, z: number, wake?: boolean): this;
+  applyImpulseAtPoint(ix: number, iy: number, iz: number, px: number, py: number, pz: number): this;
+  angvel(): { x: number; y: number; z: number };
+  setAngvel(x: number, y: number, z: number): this;
+  linvel(): { x: number; y: number; z: number };
+  setLinvel(x: number, y: number, z: number, wake?: boolean): this;
+  setEnabled(enabled: boolean): this;
+  /** Remove the rigid body from the physics world. */
+  destroy(): this;
+}
+
+/** Fluent joint builder: hinge | spring | fixed | ball. */
+export class JointBuilder {
+  hinge(bodyA: Body, bodyB: Body, options?: Record<string, unknown>): unknown;
+  spring(bodyA: Body, bodyB: Body, options?: Record<string, unknown>): unknown;
+  fixed(bodyA: Body, bodyB: Body, options?: Record<string, unknown>): unknown;
+  ball(bodyA: Body, bodyB: Body, options?: Record<string, unknown>): unknown;
+}
+
+/** Arcade vehicle controller. */
+export class Vehicle {
+  throttle(v: number): this;
+  steer(v: number): this;
+  stop(): this;
+  destroy(): this;
+}
+
+/** Input — keyboard/mouse/pointer state. */
+export class Input {
+  key(code: string): boolean;
+  pressed(code: string): boolean;
+  released(code: string): boolean;
+  axis(negative: string, positive: string): number;
+  lockPointer(): void;
+  unlockPointer(): void;
+  enabled: boolean;
+}
+
+/** PlayerController — kinematic character with camera follow. */
+export class PlayerController {
+  constructor(engine: Engine, options?: Record<string, unknown>);
+  spawn(x: number, y: number, z: number): this;
+  speed(v: number): this;
+  runSpeed(v: number): this;
+  jumpSpeed(v: number): this;
+  destroy(): void;
+}
+
+/** Assets — cached GLTF/texture loading + character packs. */
+export class Assets {
+  load(url: string): Promise<unknown>;
+  model(url: string): Promise<unknown>;
+  texture(url: string): Promise<THREE.Texture>;
+  has(url: string): boolean;
+  clear(url?: string): void;
+  readonly characters: CharacterRegistry;
+}
+
+export interface CharacterPackOptions {
+  url?: string;
+  name?: string;
+  factory?: (() => THREE.Group) | null;
+}
+
+export class CharacterRegistry {
+  registerPack(id: string, options?: CharacterPackOptions): this;
+  hasPack(id: string): boolean;
+  downloadPack(id: string): Promise<this>;
+  removePack(id: string): this;
+  list(): string[];
+  /** Spawn an avatar — falls back to the built-in default when the pack isn't downloaded. */
+  spawn(id: string, options?: { tint?: number }): Promise<THREE.Group>;
+}
+
+/** Net — multiplayer seams (no transport ships in the engine). */
+export class Net {
+  on(event: string, fn: (data: unknown) => void): this;
+  off(event: string, fn: (data: unknown) => void): this;
+  emit(event: string, data: unknown): this;
+  serialize(entity: Entity): { id: string; p: number[]; q: number[]; s: number[] };
+  applySnapshot(entity: Entity, snap: { p?: number[]; q?: number[]; s?: number[] }): this;
+  snapshotAll(): unknown[];
+  sendRate(hz: number): this;
+  connect(url: string): void;
+  send(event: string, data: unknown): void;
+  disconnect(): void;
+}
+
+/** Build — prop-building primitives (grid snapping, ghost preview, picking). */
+export class Build {
+  gridSize(s: number): this;
+  snap(value: number, grid?: number): number;
+  ghost(geometry: THREE.BufferGeometry, color?: number): THREE.Mesh;
+  clearGhost(mesh: THREE.Mesh): void;
+  pick(screenX: number, screenY: number, targets: THREE.Object3D[], options?: { snap?: boolean }): THREE.Intersection | null;
+  pickScene(screenX: number, screenY: number, options?: Record<string, unknown>): THREE.Intersection | null;
+  snapVec3(v: THREE.Vector3): THREE.Vector3;
+}
+
+/** World — terrain, water, scatter, day/night, fluids, surfaces. */
+export class World {
+  surfaceKind(name: string, opts?: Record<string, unknown>): this;
+  surfaceKinds(): string[];
+  fluidType(name: string, def?: Record<string, unknown>): this;
+  fluid(options?: Record<string, unknown>): unknown;
+  registerKind(name: string, factory: () => Entity): this;
+  ground(options?: { size?: number; color?: number }): Entity;
+  dayNight(): DayNightCycle;
+  post(): PostChain;
+  terrain(options?: {
+    size?: number;
+    resolution?: number;
+    height?: (x: number, z: number) => number;
+    color?: number;
+    colorByHeight?: boolean;
+    surface?: Record<string, unknown> | null;
+    surfaceRepeat?: number;
+  }): Entity;
+  groundHeight(x: number, z: number): number;
+  water(options?: { level?: number; color?: number; waves?: number; size?: number; opacity?: number }): unknown;
+  scatter(kind: string, options?: Record<string, unknown>): unknown;
+  biome(name: string, options?: { area?: unknown; color?: number | null }): unknown;
+  update(dt: number): void;
+}
+
+export class DayNightCycle {
+  speed(seconds: number): this;
+  time(t: number): this;
+  pause(): this;
+  resume(): this;
+}
+
+/** AI — steering agents with shape-cast wall sliding. */
+export class AI {
+  agent(entity: Entity): Agent;
+  release(agent: Agent): void;
+}
+
+export class Agent {
+  speed(v: number): this;
+  bodyRadius(r: number): this;
+  goto(dest: Vec3Input, options?: { arrive?: number; onArrive?: (agent: Agent) => void }): this;
+  wander(area?: Record<string, unknown>): this;
+  follow(target: Vec3Input | Entity, dist?: number): this;
+  flee(danger: Vec3Input | Entity): this;
+  stop(): this;
+  state(states: Record<string, AgentStateDef>): this;
+  to(name: string): this;
+  when(cond: () => boolean, name: string): this;
+  distanceToTarget(): number;
+}
+
+export interface AgentStateDef {
+  enter?: (agent: Agent) => void;
+  update?: (dt: number, agent: Agent) => void;
+  exit?: (agent: Agent) => void;
+}
+
+/** StateMachine — tiny FSM used by AI agents. */
+export class StateMachine {
+  constructor(states?: Record<string, AgentStateDef>);
+  add(name: string, def: AgentStateDef): this;
+  to(name: string, ctx?: unknown): this;
+  when(cond: (ctx: unknown) => boolean, name: string): this;
+  update(dt: number, ctx?: unknown): void;
+}
+
+/** Time — scheduling + tweening. */
+export class Time {
+  after(seconds: number, fn: () => void): TimeHandle;
+  every(seconds: number, fn: () => void): TimeHandle;
+  tween(entity: Entity): Tween;
+}
+
+/** Cancellable handle returned by after()/every(). */
+export interface TimeHandle {
+  readonly cancelled: boolean;
+  cancel(): this;
+}
+
+/** Fluent tween: `.to({ at, opacity, scale }, duration).ease('outCubic').then(fn)`. */
+export class Tween {
+  to(props: { at?: Vec3Input; opacity?: number; scale?: number | [number, number, number] }, duration?: number): this;
+  ease(name: string): this;
+  then(fn: () => void): this;
+  onComplete(fn: () => void): this;
+  cancel(): this;
+  readonly done: boolean;
+}
+
+export declare const EASES: Record<string, (t: number) => number>;
+export declare function easeValue(name: string, t: number): number;
+
+/** Plugins — installed via `app.use()`. Core never imports them. */
+export declare const AudioPlugin: VWorldPlugin;
+export declare const EffectsPlugin: VWorldPlugin;
+export declare const PostPlugin: VWorldPlugin;
+export declare const AnimationPlugin: VWorldPlugin;
+export declare const allPlugins: VWorldPlugin[];
+
+export interface AudioEngineLike {
+  register(name: string, url: string): void;
+  has(name: string): boolean;
+  play(name: string, options?: Record<string, unknown>): void;
+  ambient(target: unknown, options?: { volume?: number }): void;
+  zone(box: unknown, preset?: string): void;
+  volume(v: number): this;
+  mute(m?: boolean): this;
+  dispose(): void;
+}
+
+export interface Animator {
+  play(name: string, options?: Record<string, unknown>): this;
+  stop(): this;
+}
+
+/** Post-processing chain — `app.world.post().bloom(0.6).vignette(0.35)`. */
+export class PostChain {
+  bloom(amount: number): this;
+  vignette(amount: number): this;
+  preset(name: string): this;
+  enabled: boolean;
+  render(): void;
+}
+
+// --- Surfaces (v0.3.0) ----------------------------------------------------------
+
+export declare const MAX_SURFACE_LAYERS: number;
+export declare function valueNoise(x: number, y: number): number;
+export interface SurfaceRuleContext {
+  x: number;
+  z: number;
+  height: number;
+  slope: number;
+  fluids: unknown[];
+}
+export declare function evaluateRuleWeight(rule: Record<string, unknown>, ctx: SurfaceRuleContext): number;
+export declare function compositeWeights(raw: number[]): number[];
+export declare class SurfaceKinds {
+  register(name: string, def: Record<string, unknown>): this;
+  get(name: string): Record<string, unknown> | undefined;
+  names(): string[];
+}
+export declare function buildAtlas(kindNames: string[], kinds: SurfaceKinds): THREE.Texture;
+export declare function buildSplatMaterial(
+  kindDefs: Record<string, unknown>[],
+  options?: { repeat?: number; atlasTexture?: THREE.Texture | null }
+): THREE.ShaderMaterial;
+
+// --- Fluids (v0.3.0) ------------------------------------------------------------
+
+export declare const BUILTIN_FLUID_TYPES: Record<string, Record<string, unknown>>;
+export declare function submergedFraction(
+  aabb: { min: { x: number; y: number; z: number }; max: { x: number; y: number; z: number } },
+  box: { min: { x: number; y: number; z: number }; max: { x: number; y: number; z: number } }
+): number;
+export declare function buoyancyNetAccel(fluidDensity: number, bodyDensity: number, fraction: number, g?: number): number;
+export declare class Fluid {
+  constructor(options?: Record<string, unknown>);
+  onEnter(fn: (entity: Entity) => void): this;
+  onExit(fn: (entity: Entity) => void): this;
+  dispose(): void;
+}
+export declare class FluidSystem {
+  add(fluid: Fluid): this;
+  remove(fluid: Fluid): this;
+  update(dt: number): void;
+}
+
+// --- normalize utils ------------------------------------------------------------
+
+export declare function toVec3(...args: Vec3Input[]): THREE.Vector3;
+export declare function toXYZ(...args: Vec3Input[]): { x: number; y: number; z: number };
+export declare function toNumber(v: unknown, name?: string, fallback?: number): number;
+export declare function withDefaults<T extends Record<string, unknown>>(options: Partial<T> | undefined, defaults: T): T;
+export declare function toAxis(v: unknown, name?: string): 'x' | 'y' | 'z';
+export declare function axisToVec3(axis: unknown): THREE.Vector3;
+export declare function toBox3(v: unknown, name?: string): THREE.Box3;
+
+// --- production hardening (v0.4.0) ------------------------------------------------
+
+/**
+ * Base class for every engine-thrown error. Carries a machine-readable `.code`
+ * like 'VWORLD/PHYSICS_NOT_READY'.
+ */
+export declare class VWorldError extends Error {
+  readonly code: VWorldErrorCode;
+  constructor(code: VWorldErrorCode, message: string, opts?: { cause?: unknown });
+}
+
+/** Shorthand factory for VWorldError. */
+export declare function vError(code: VWorldErrorCode, message: string, opts?: { cause?: unknown }): VWorldError;
+
+/** Pure, testable error bus (see createErrorBus). */
+export interface ErrorBus {
+  onError(fn: (err: Error) => void): ErrorBus;
+  offError(fn: (err: Error) => void): ErrorBus;
+  report(err: unknown): ErrorBus;
+}
+
+/**
+ * Pure, testable error bus. Handlers run in registration order; with no
+ * handlers, errors fall back to `console.error`.
+ */
+export declare function createErrorBus(): ErrorBus;
+
+/** Report through the engine's error bus (falls back to console.error). Internal. */
+export declare function reportError(engine: { _errorBus?: ErrorBus } | null | undefined, err: unknown): void;
+
+/** Zero-dependency frame-time profiler. */
+export declare class Profiler {
+  constructor(options?: { enabled?: boolean; windowSize?: number });
+  /** Master switch — when false, begin()/end() are no-ops. */
+  enabled: boolean;
+  /** Start timing a named section. Chainable. */
+  begin(name: string): this;
+  /** Stop timing a named section and record the sample. Chainable. */
+  end(name: string): this;
+  /** Record an explicit sample. Chainable. */
+  record(name: string, ms: number): this;
+  /** Stats per section over the rolling window. */
+  report(): Record<string, { avgMs: number; maxMs: number; calls: number }>;
+  /** Clear all samples and call counts. Chainable. */
+  reset(): this;
+  /** One-line human summary, e.g. `fixed: avg 0.42ms max 1.10ms (60 calls)`. */
+  summary(): string;
+}
+
+/** All supported quality level names, high → low. */
+export declare const QUALITY_LEVELS: readonly ['high', 'medium', 'low'];
+
+/**
+ * Resolve a quality level + devicePixelRatio into concrete renderer settings.
+ * 'auto' resolves to high settings (runtime stepping adjusts it later).
+ */
+export declare function resolveQuality(
+  level: QualityMode,
+  dpr?: number
+): { pixelRatio: number; shadows: boolean };
+
+/** Normalize an app.quality() argument into a level name. */
+export declare function normalizeQuality(v: QualityMode | { level: QualityMode }): QualityMode;
+
+/**
+ * Pure auto-quality stepping rule: returns the new level and the updated
+ * consecutive-high-FPS streak.
+ */
+export declare function autoStep(
+  currentLevel: QualityLevel,
+  avgFps: number,
+  highStreak?: number
+): { level: QualityLevel; highStreak: number };
+
+/** Engine version. */
+export declare const VERSION: string;

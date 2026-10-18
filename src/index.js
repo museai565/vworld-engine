@@ -24,5 +24,9 @@ export { AudioPlugin, EffectsPlugin, PostPlugin, AnimationPlugin, allPlugins } f
 export { SurfaceKinds, buildAtlas, buildSplatMaterial, evaluateRuleWeight, compositeWeights, valueNoise, MAX_SURFACE_LAYERS } from './Surfaces.js';
 export { FluidSystem, Fluid, BUILTIN_FLUID_TYPES, submergedFraction, buoyancyNetAccel } from './Fluids.js';
 export { toVec3, toXYZ, toNumber, withDefaults, toAxis, axisToVec3, toBox3 } from './util/normalize.js';
+// v0.4.0 — production hardening
+export { Profiler } from './Profiler.js';
+export { VWorldError, vError, createErrorBus, reportError } from './util/errors.js';
+export { QUALITY_LEVELS, resolveQuality, normalizeQuality, autoStep } from './util/quality.js';
 
-export const VERSION = '0.3.0';
+export const VERSION = '0.4.0';

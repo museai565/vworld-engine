@@ -3,6 +3,13 @@
 A Laravel-DX-flavored 3D game engine built on **Three.js** + **Rapier physics** (WASM).
 Fluent, chainable APIs. Sensible defaults. One line gets a running scene.
 
+> **v0.4.0 — production hardening.** TypeScript definitions for the full
+> public API, a central error bus (`app.onError`) with machine-readable
+> error codes, full resource disposal (`entity.dispose()` / `app.dispose()`)
+> with debug-mode leak detection, WebGL context-loss recovery, adaptive
+> render quality (`app.quality('auto')`), and a zero-dependency frame
+> profiler (`app.profiler()`).
+>
 > **v0.3.0 — surfaces & fluids.** Rule-blended terrain materials (the floor
 > IS grass/sand/rock/snow — splat mapping), custom surface kinds, and game
 > fluids: volumes with buoyancy, currents, viscosity, damage, splash/exit
@@ -466,6 +473,149 @@ net.on('entity:update', (snap) => { /* apply */ });
 const snap = net.serialize(entity);   // { id, p, q, s } wire format
 net.applySnapshot(entity, snap);
 ```
+
+## Production hardening (v0.4.0)
+
+### TypeScript definitions
+
+The full public API ships with types at the package root (`"types": "index.d.ts"`):
+
+```ts
+import { Engine, VWorldError, type QualityMode } from '@vworld/engine';
+
+const app = Engine.create({ canvas: document.querySelector('canvas')! });
+const level: QualityMode = 'auto';
+app.quality(level).start();
+```
+
+### Error handling — the error bus
+
+Every internal catch site (event handlers, plugin installs, `moveTo` arrival
+callbacks, entity contact listeners) reports to a central bus instead of
+dropping errors into the void:
+
+```js
+app.onError((err) => {
+  console.log(err.code, err.message); // 'VWORLD/EVENT_HANDLER_THREW', ...
+  sendToTelemetry(err);
+});
+app.offError(myHandler); // unsubscribe; both are chainable
+```
+
+With no handlers registered, errors fall back to `console.error` — nothing is
+ever silently swallowed. Thrown validation errors keep their messages, and
+key ones are `VWorldError` with machine-readable codes:
+
+| Code | When |
+|---|---|
+| `VWORLD/MISSING_CANVAS` | `Engine.create()` without a `<canvas>` |
+| `VWORLD/APP_DISPOSED` | `start()` / `entity()` after `app.dispose()` |
+| `VWORLD/BAD_PLUGIN` | `app.use()` got a malformed plugin object |
+| `VWORLD/PLUGIN_INSTALL_FAILED` | a plugin's `install()` threw during `app.use()` (also re-thrown, with the original as `.cause`) |
+| `VWORLD/UNKNOWN_EVENT` | `app.on()` with an unknown event name |
+| `VWORLD/EVENT_HANDLER_THREW` | a subscribed engine-event handler threw |
+| `VWORLD/PHYSICS_NOT_READY` | physics touched before `await app.ready` |
+| `VWORLD/BODY_NOT_BOUND` | `body.on()` before `.bind(entity)` |
+| `VWORLD/BAD_BODY` | a joint builder got a non-Body argument |
+| `VWORLD/PLUGIN_MISSING` | `entity.anim()` without the animation plugin |
+| `VWORLD/UNKNOWN_QUALITY` | `app.quality()` got an unknown level |
+| `VWORLD/BAD_QUALITY` | `app.quality()` got an unreadable value |
+
+```js
+import { VWorldError } from '@vworld/engine';
+try { await app.ready; /* ... */ }
+catch (err) {
+  if (err instanceof VWorldError && err.code === 'VWORLD/PHYSICS_NOT_READY') { /* ... */ }
+}
+```
+
+### Disposal
+
+`entity.dispose()` is full teardown — frame/move tickers, geometries,
+materials **and textures**, the bound physics body (removed via the body's
+own API), engine untracking, and scene removal. It's idempotent:
+
+```js
+const crate = app.entity().box(1, 1, 1, 0xff5a5a);
+// later…
+crate.dispose();
+```
+
+`entity.destroy()` still works but is deprecated (one-time `console.warn`) —
+it now just calls `dispose()`.
+
+`app.dispose()` tears everything down: fires `'dispose'` (plugins clean up
+first), disposes every entity still alive, stops the loop, removes the
+resize **and** WebGL-context listeners, disposes the renderer, and clears
+plugin/event/updater maps. Double-dispose is a safe no-op. After dispose,
+`start()` throws `VWORLD/APP_DISPOSED` — build a new `Engine` instead:
+
+```js
+window.addEventListener('beforeunload', () => app.dispose());
+```
+
+### Debug mode — leak detection
+
+```js
+const app = Engine.create({ canvas, debug: true });
+// or: app.debug(true).debug(false) — chainable toggle
+```
+
+In debug mode the engine tracks entities created via `app.entity()`. On
+`app.dispose()` it warns once listing any entities that were never disposed
+(up to 10 ids plus the count):
+
+```
+[VWorld] debug: 3 entities were not disposed before app.dispose(): entity_7, entity_12, entity_31
+```
+
+### Adaptive quality
+
+```js
+app.quality('low');            // pixelRatio 1, shadows off
+app.quality('medium');         // pixelRatio min(dpr, 1.5), shadows on
+app.quality({ level: 'auto' }); // object form also accepted
+app.quality();                 // => 'high' — current effective level
+```
+
+`'auto'` starts at high and samples FPS over rolling 2-second windows in the
+frame loop: average under 45 steps down a level; average over 57 for 3
+consecutive windows steps back up. Level changes apply pixel ratio + shadows
+immediately. Default is `'high'` (unchanged behavior).
+
+### Profiler
+
+```js
+const prof = app.profiler();
+prof.begin('npcThink');
+// ... work ...
+prof.end('npcThink');
+
+console.log(prof.summary());
+// fixed: avg 0.42ms max 1.10ms (60 calls) | frame: avg 0.80ms max 1.42ms (60 calls) | render: avg 1.05ms max 2.30ms (60 calls)
+
+prof.report();  // { fixed: { avgMs, maxMs, calls }, ... }
+prof.reset();   // clear all samples
+prof.enabled = false; // begin()/end() become no-ops
+```
+
+The engine measures `'fixed'` (fixed updaters + physics step), `'frame'`
+(input + frame updaters + world update), and `'render'` itself. Each section
+keeps a rolling window of the last 120 samples. Pure logic, no DOM.
+
+### WebGL context-loss recovery
+
+The engine listens for `webglcontextlost` on the canvas: it prevents the
+default, pauses the loop (remembering whether it was running), and emits
+`'contextlost'`. On `webglcontextrestored` it refreshes the renderer size,
+resumes the loop if it was running, and emits `'contextrestored'`:
+
+```js
+app.on('contextlost', () => showOverlay('GPU context lost — waiting…'));
+app.on('contextrestored', () => hideOverlay());
+```
+
+Both listeners are removed by `app.dispose()`.
 
 ## Demo playground
 

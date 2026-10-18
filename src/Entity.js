@@ -1,7 +1,9 @@
 import * as THREE from 'three';
 import { toVec3, toNumber, withDefaults } from './util/normalize.js';
+import { vError, reportError } from './util/errors.js';
 
 let _nextId = 1;
+let _destroyWarned = false;
 
 function stdMaterial(color) {
   return new THREE.MeshStandardMaterial({ color, roughness: 0.7, metalness: 0.05 });
@@ -28,6 +30,7 @@ export class Entity {
     this._collideListeners = [];  // { filter, fn }
     this._moveTicker = null;
     this._animator = null;
+    this._disposed = false;
   }
 
   // --- tags --------------------------------------------------------------------
@@ -114,7 +117,7 @@ export class Entity {
         obj.position.copy(target);
         this._stopMove();
         if (typeof onArrive === 'function') {
-          try { onArrive(this); } catch (err) { console.error('[VWorld] moveTo onArrive threw:', err); }
+          try { onArrive(this); } catch (err) { reportError(this.engine, err); }
         }
         return;
       }
@@ -220,7 +223,7 @@ export class Entity {
       try {
         if (kind === 'collide') l.fn(otherEntity, started);
         else l.fn(otherEntity);
-      } catch (err) { console.error('[VWorld] entity event listener threw:', err); }
+      } catch (err) { reportError(this.engine, err); }
     }
   }
 
@@ -228,13 +231,13 @@ export class Entity {
   /** Animator for this entity — requires app.use(AnimationPlugin) first. */
   anim() {
     if (!this.engine || !this.engine.using('animation')) {
-      throw new Error('[VWorld] entity.anim() needs the animation plugin — app.use(AnimationPlugin) first.');
+      throw vError('VWORLD/PLUGIN_MISSING', '[VWorld] entity.anim() needs the animation plugin — app.use(AnimationPlugin) first.');
     }
     if (!this._animator) this._animator = this.engine.animation.for(this);
     return this._animator;
   }
 
-  /** Run `fn(dt, entity)` every rendered frame. Removed on destroy(). */
+  /** Run `fn(dt, entity)` every rendered frame. Removed on dispose(). */
   onUpdate(fn) {
     if (this.engine) {
       const wrapped = (dt) => fn(dt, this);
@@ -244,19 +247,62 @@ export class Entity {
     return this;
   }
 
-  /** Remove from scene, dispose geometry/materials, unhook tickers. */
-  destroy() {
+  /**
+   * Full teardown: stop tickers (frame loop + in-flight moveTo), dispose all
+   * geometries/materials/textures, remove the bound physics body from the
+   * physics world (via the body's own removal API when present), untrack from
+   * the engine, and remove from the scene graph. Idempotent. Chainable.
+   */
+  dispose() {
+    if (this._disposed) return this;
+    this._disposed = true;
+
     this._stopMove();
     if (this._ticker && this.engine) this.engine.offUpdate(this._ticker);
+    this._ticker = null;
+
+    // GPU resources: geometries, materials, and any textures on them.
     this.object.traverse((o) => {
       if (o.isMesh) {
         o.geometry?.dispose();
         const mats = Array.isArray(o.material) ? o.material : [o.material];
-        mats.forEach((m) => m?.dispose());
+        for (const m of mats) {
+          if (!m) continue;
+          for (const key of Object.keys(m)) {
+            const v = m[key];
+            if (v && v.isTexture) v.dispose();
+          }
+          m.dispose();
+        }
       }
     });
+
+    // Physics body: use its own removal API when it exists, else just detach.
+    if (this._body) {
+      const body = this._body;
+      this._body = null;
+      try {
+        if (body && typeof body.destroy === 'function') body.destroy();
+      } catch (err) { reportError(this.engine, err); }
+    }
+
     this.object.removeFromParent();
+    this._collideListeners.length = 0;
+    if (this.engine && typeof this.engine._untrackEntity === 'function') {
+      this.engine._untrackEntity(this);
+    }
     return this;
+  }
+
+  /**
+   * @deprecated Use dispose() instead. Kept for v0.1.x–v0.3.x compatibility.
+   */
+  destroy() {
+    if (!_destroyWarned) {
+      _destroyWarned = true;
+      console.warn('[VWorld] entity.destroy() is deprecated — use entity.dispose() instead.');
+    }
+    return this.dispose();
   }
 
   // --- networking seam ---------------------------------------------------------
